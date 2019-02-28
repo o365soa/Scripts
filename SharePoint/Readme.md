@@ -1,4 +1,4 @@
-This folder contains set of sample scripts to help you get further information from your SharePoint Online tenant.
+This folder contains set of sample scripts to help you get further information from your SharePoint Online tenant. These scripts are provided for reference and example purposes only. Please ensure that you thoroughly review each script before executing it within your environment.
 
 ### Get Admins for Site Collections
 
