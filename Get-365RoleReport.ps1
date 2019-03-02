@@ -37,7 +37,7 @@ $mRoles = Get-MsolRole
 ForEach($mRole in $mRoles) {
 
     # Get the member
-    $mRoleUsers = Get-MsolRoleMember -RoleObjectId $mRole.ObjectId
+    $mRoleUsers = Get-MsolRoleMember -RoleObjectId $mRole.ObjectId | Where-Object {$_.RoleMemberType -ne 'ServicePrincipal'}
 
     # Itterate each user
     ForEach($mRoleUser in $mRoleUsers) {
