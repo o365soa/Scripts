@@ -61,9 +61,13 @@ If($All) {
     }
 
 }
-	
+
+#Counter for progress bar control
+$i=1
 ForEach ($User in $Users)
 {
+    Write-Progress -Activity "Setting audit enabled for all mailboxes" -Status "Setting for user $($i) of $($Users.length)" -PercentComplete (($i / $Users.length) * 100)
     Write-Host "$(Get-Date) Setting audit enabled for user $($User.Identity)" -ForegroundColor Green
     Set-Mailbox -Identity $User.Identity -AuditLogAgeLimit 90 -AuditEnabled $true -AuditAdmin UpdateCalendarDelegation,UpdateFolderPermissions,UpdateInboxRules,Update,Move,MoveToDeletedItems,SoftDelete,HardDelete,FolderBind,SendAs,SendOnBehalf,Create,Copy,MessageBind -AuditDelegate UpdateFolderPermissions,UpdateInboxRules,Update,Move,MoveToDeletedItems,SoftDelete,HardDelete,FolderBind,SendAs,SendOnBehalf,Create -AuditOwner UpdateCalendarDelegation,UpdateFolderPermissions,UpdateInboxRules,Update,MoveToDeletedItems,Move,SoftDelete,HardDelete,Create,MailboxLogin
+    $i++
 }
