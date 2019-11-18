@@ -137,8 +137,8 @@ Function Disable-ForwardingRules {
 	)
     Write-Host "[$UPN] Disabling forwarding rules.."
     
-    if($ConfirmAll) { $Confrimation = $false; } else { $Comfirmation = $true; }
-    Get-InboxRule -Mailbox $upn | Where-Object {(($_.Enabled -eq $true) -and (($_.ForwardTo -ne $null) -or ($_.ForwardAsAttachmentTo -ne $null) -or ($_.RedirectTo -ne $null) -or ($_.SendTextMessageNotificationTo -ne $null)))} | Disable-InboxRule -Confirm:$Confrimation
+    if($ConfirmAll) { $Confirmation = $false; } else { $Confirmation = $true; }
+    Get-InboxRule -Mailbox $upn | Where-Object {(($_.Enabled -eq $true) -and (($_.ForwardTo -ne $null) -or ($_.ForwardAsAttachmentTo -ne $null) -or ($_.RedirectTo -ne $null) -or ($_.SendTextMessageNotificationTo -ne $null)))} | Disable-InboxRule -Confirm:$Confirmation
 
 }
 
