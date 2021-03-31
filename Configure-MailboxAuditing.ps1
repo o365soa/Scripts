@@ -24,7 +24,7 @@
         by default but do not have their mailbox audit events being sent to the Unified Audit Log.
         
         2. For all mailboxes that do not have the recommended actions being logged, enable the
-        the recommended actions (overwriting whatever is currently set). The recommended actions
+        the recommended actions (preserving any additional actions that are enabled). The recommended actions
         are those enabled by default. (This phase can be skipped with the DoNotSetAuditActions parameter.)
 
         You need to be connected to Exchange Online using the v2 management
@@ -54,9 +54,9 @@ $today = Get-Date -Format yyyyMMdd
 
 #Function that determines if a mailbox's actions that are being logged are at least the
 #ones that are recommended
-function Compare-AuditActions ($mailbox,$logonType)
+function Compare-AuditActions ($mailbox)
     {
-    #Actions enabled by default for logon types (plus MailboxLogin for owner) and licensing
+    #Actions enabled by default for logon types and licensing
     [System.Collections.ArrayList]$NonE5OwnerActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','UpdateFolderPermissions','UpdateInboxRules','UpdateCalendarDelegation','ApplyRecord'
     [System.Collections.ArrayList]$NonE5DelegateActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','SendAs','SendOnBehalf','Create','UpdateFolderPermissions','UpdateInboxRules','ApplyRecord'
     [System.Collections.ArrayList]$NonE5AdminActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','SendAs','SendOnBehalf','Create','UpdateFolderPermissions','UpdateInboxRules','UpdateCalendarDelegation','ApplyRecord'
@@ -64,55 +64,56 @@ function Compare-AuditActions ($mailbox,$logonType)
     [System.Collections.ArrayList]$E5DelegateActions = $NonE5DelegateActions + 'MailItemsAccessed'
     [System.Collections.ArrayList]$E5AdminActions = $NonE5AdminActions + 'MailItemsAccessed','Send'
     
-    if ($mailbox.DefaultAuditSet -contains $logonType)
-        {
-        #Enabled actions are default
-        return $false
-        }
-    else 
-        {
-        #Determine if mailbox that is not using default audit set is logging at least the default actions
-        switch ($logonType)
-            {
-            'Admin' {$diffObject = $mailbox.AuditAdmin}
-            'Delegate' {$diffObject = $mailbox.AuditDelegate}
-            'Owner' {$diffObject = $mailbox.AuditOwner}
-            }
-        
-        #Set reference actions based on mailbox licensing
-        if ($mailbox.PersistedCapabilities -contains 'BPOS_S_EquivioAnalytics' `
-            -or $mailbox.PersistedCapabilities -contains 'M365Auditing')
-            {
-            #Mailbox has E5 license or Compliance add-on license
-            switch ($logonType)
-                {
-                'Admin' {$refObject = $E5AdminActions}
-                'Delegate' {$refObject = $E5DelegateActions}
-                'Owner' {$refObject = $E5OwnerActions}
-                }
-            }
-        else
-            {
-            switch ($logonType)
-                {
-                'Admin' {$refObject = $NonE5AdminActions}
-                'Delegate' {$refObject = $NonE5DelegateActions}
-                'Owner' {$refObject = $NonE5OwnerActions}
-                }
-            }
+    $logonTypes = @('AuditOwner','AuditDelegate','AuditAdmin')
 
-        if (Compare-Object -ReferenceObject $refObject -DifferenceObject $diffObject |
-            Where-Object {$_.SideIndicator -eq '<='})
-            {
+    #Set reference actions based on mailbox licensing
+    if ($mailbox.PersistedCapabilities -contains 'BPOS_S_EquivioAnalytics' `
+    -or $mailbox.PersistedCapabilities -contains 'M365Auditing') {
+        $AuditAdminActions = $E5AdminActions
+        $AuditDelegateActions = $E5DelegateActions
+        $AuditOwnerActions = $E5OwnerActions
+    }
+    else {
+        $AuditAdminActions = $NonE5AdminActions
+        $AuditDelegateActions = $NonE5DelegateActions
+        $AuditOwnerActions = $NonE5OwnerActions
+    }
+
+    foreach ($logonType in $logonTypes) {
+
+        #Actions being logged for the logon type to compare against
+        $diffObject = $mailbox.$logonType
+
+        #Set baseline actions for the logon type to use as a reference
+        switch ($logonType) {
+            'AuditAdmin' {$refObject = $AuditAdminActions}
+            'AuditDelegate' {$refObject = $AuditDelegateActions}
+            'AuditOwner' {$refObject = $AuditOwnerActions}
+        }
+
+        $actionComparison = Compare-Object -ReferenceObject $refObject -DifferenceObject $diffObject
+        
+        if ($actionComparison | Where-Object {$_.SideIndicator -eq '<='}) {
             #Mailbox is missing recommended actions
-            return $true
-            }
-        else
-            {
-            return $false
-            }
+            $actionsMissing = $true
+        }
+        if ($actionComparison | Where-Object {$_.SideIndicator -eq '=>'}) {              
+            #Non-default actions are being logged
+            New-Variable -Name $('nonDefault'+$logonType) -Value $true
+            $nonDefault = $true
         }
     }
+
+    if ($actionsMissing) {
+        return New-Object -TypeName psobject -Property @{
+            MissingDefaultActions = $true
+            HasCustomActions = $(if ($nonDefault) {$true} else {$false})
+            HasCustomActionsAdmin = $nonDefaultAuditAdmin
+            HasCustomActionsDelegate = $nonDefaultAuditDelegate
+            HasCustomActionsOwner = $nonDefaultAuditOwner
+        }
+    }
+}
 
 Write-Host "$(Get-Date) Beginning phase 1..." -ForegroundColor Green
 
@@ -183,12 +184,27 @@ if ($DoNotSetAuditActions -eq $false)
         Write-Progress -Activity "Determining mailboxes that do not have the recommended actions enabled" `
             -Status "Processing mailbox for $($mb.DisplayName)" -PercentComplete ($j/$allMailboxes.Count*100)
 
+        #Check only mailboxes not using default audit set for any logon type
         if ($mb.DefaultAuditSet -join '' -ne 'AdminDelegateOwner') {
-            if ((Compare-AuditActions -mailbox $mb -logonType Owner) -or
-                (Compare-AuditActions -mailbox $mb -logonType Delegate) -or
-                (Compare-AuditActions -mailbox $mb -logonType Admin)){
-                    
-                    $nonDefaultActionsMB.Add($mb) | Out-Null
+            
+            $mbActionsCheck = Compare-AuditActions -mailbox $mb
+            
+            #Add mailbox to collection of those that need to be updated and whether extra actions need to be re-added
+            if ($mbActionsCheck.MissingDefaultActions -eq $true) {
+                $mbToAdd = New-Object -TypeName psobject -Property @{
+                    DisplayName = $mb.DisplayName
+                    DistinguishedName = $mb.DistinguishedName
+                    UserPrincipalName = $mb.UserPrincipalName
+                    HasCustomActions = $mbActionsCheck.HasCustomActions
+                    HasCustomActionsAdmin = $mbActionsCheck.HasCustomActionsAdmin
+                    HasCustomActionsDelegate = $mbActionsCheck.HasCustomActionsDelegate
+                    HasCustomActionsOwner = $mbActionsCheck.HasCustomActionsOwner
+                    AuditAdmin = $mb.AuditAdmin
+                    AuditDelegate = $mb.AuditDelegate
+                    AuditOwner = $mb.AuditOwner
+                }
+
+            $nonDefaultActionsMB.Add($mbToAdd) | Out-Null
             }
         }
         $j++
@@ -200,7 +216,7 @@ if ($DoNotSetAuditActions -eq $false)
     
     if ($nonDefaultActionsMB.Count -gt 0)
         {
-        Write-Host "$(Get-Date) Resetting audit logging so the default actions are enabled..." `
+        Write-Host "$(Get-Date) Adding recommended actions to be logged..." `
             -ForegroundColor Green
         
         [System.Collections.ArrayList]$RecommendedActionsLog = @()
@@ -208,16 +224,37 @@ if ($DoNotSetAuditActions -eq $false)
         $k = 1
         foreach ($mb in $nonDefaultActionsMB)
             {
-            Write-Progress -Activity "Restting default actions" -Status "Processing mailbox for $($mb.DisplayName)" `
+            Write-Progress -Activity "Adding recommended actions" -Status "Processing mailbox for $($mb.DisplayName)" `
                 -PercentComplete ($k/$nonDefaultActionsMB.Count*100)
-            Write-Verbose -Message "Resetting default actions for $($mb.DisplayName)."
 
             #Configure the mailbox to use the default audit set for all logon types
+            Write-Verbose -Message "Adding recommended actions for $($mb.DisplayName)."
             Set-Mailbox -Identity $mb.DistinguishedName -DefaultAuditSet Admin,Delegate,Owner
+            
+            #If additional actions were being logged, add them back
+            #Actions being added that are already logged do not result in error
+            if ($mb.HasCustomActions -eq $true) {
+                Write-Verbose -Message "Re-adding custom actions for $($mb.DisplayName)."
+                #Build command based on logon types that need actions re-added
+                $command = {Set-Mailbox -Identity $mb.DistinguishedName}
+                if ($mb.HasCustomActionsAdmin -eq $true) {
+                    $command = [ScriptBlock]::Create($command.ToString() + ' -AuditAdmin @{add=$mb.AuditAdmin}')
+                }
+                if ($mb.HasCustomActionsDelegate -eq $true) {
+                    $command = [ScriptBlock]::Create($command.ToString() + ' -AuditDelegate @{add=$mb.AuditDelegate}')
+                }
+                if ($mb.HasCustomActionsOwner -eq $true) {
+                    $command = [ScriptBlock]::Create($command.ToString() + ' -AuditOwner @{add=$mb.AuditOwner}')
+                }
+                #Write-Verbose -Message "Command that will be executed to re-add custom actions: $command"
+                #Execute built command
+                &$command
+            }
+
             $RecommendedActionsLog.Add($mb.UserPrincipalName) | Out-Null
             $k++
             }
-        Write-Progress -Activity "Resetting default actions" -Status " " -Completed
+        Write-Progress -Activity "Adding recommended actions" -Status " " -Completed
         $RecommendedActionsLog | Out-File -FilePath $RecommendedActionsLogFile -Append
         Write-Host "$(Get-Date) Mailboxes that have been modified are logged in $RecommendedActionsLogFile in the current directory." `
             -ForegroundColor Green
