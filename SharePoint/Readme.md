@@ -1,10 +1,10 @@
-This folder contains set of sample scripts to help you get further information from your SharePoint Online tenant. These scripts are provided for reference and example purposes only. Please ensure that you thoroughly review each script before executing it within your environment.
+This folder contains sample scripts to help you get additional information from your SharePoint Online tenant. These scripts are provided for reference and example purposes only. Please ensure that you thoroughly review each script before executing it within your environment.
 
 ### Get Admins for Site Collections
 
-ODSPControls_GetAdmins.ps1
+Get-SPOSiteAdmins.ps1
 
-This script iterates through all the SharePoint Site Collections except Groups Connected Team Sites and gets the list of admins for each site. If the user running the script does not admin rights on the Site Collectioni, script will add the user to the Site Collection as admin and after completion remove the added user.
+This script iterates through all the SharePoint Online site collections with a /sites or /teams path and gets the list of admin entries for each site. If the user running the script does not have site admin permission to the site collection, the script will add the user as a site admin to the site collection and then remove the user after the site has been checked.
 
 # Disclaimer
 
