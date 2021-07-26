@@ -32,9 +32,12 @@
 		use this switch if you don't want to add the account as a site admin (and, therefore, skip
 		checking any site that would need the account added in order to perform the check).  If added,
 		the permission is removed after the site is checked.
+    .Parameter IncludeOneDriveSites
+        Switch to include OneDrive for Business sites.  By default, OneDrive for Business sites
+        are not included in the report.
 	.Notes
-		Version: 2.0
-		Date: June 22, 2021
+		Version: 2.1
+		Date: July 26, 2021
 #>
 
 Param(
@@ -43,7 +46,8 @@ Param(
     [String]$OutputDir = (Get-Location).Path,
     [Parameter(Mandatory=$true)][String]$SPOAdmin,
     [String]$SPOTenantName,
-    [Switch]$SPOPermissionOptOut
+    [Switch]$SPOPermissionOptOut,
+    [Switch]$IncludeOneDriveSites
 )
 
 if (-not([System.Management.Automation.PSTypeName]'SiteCollectionAdminState').Type){
@@ -132,21 +136,31 @@ function Get-SPOAdminsList
 	}
 
     #Get list of sites
-    [array]$sites = Get-SPOSite -Limit All -IncludePersonalSite $true
+    if ($IncludeOneDriveSites -eq $true) {
+        [array]$sites = Get-SPOSite -Limit All -IncludePersonalSite $true
+    }
+    else {
+        [array]$sites = Get-SPOSite -Limit All
+    }
     $admins = @()
     $siteAdmins = @()
     
+    # Get domains for SPO/ODfB sites to support custom domain in sites' FQDN
+    $nonOdSite = $sites | Sort-Object -Property Url -Descending | Where-Object {$_.Url.Substring($_.Url.IndexOf('.')-3,3) -ne '-my'} | Select-Object -First 1
+    $sPOSitesDomain = $nonOdSite.Url.Substring(8,$nonOdSite.Url.IndexOf('/',8)-8)
+    $domainParts = $sPOSitesDomain.Split('.')
+    $domainParts[0] = $domainParts[0] + '-my'
+    $oDSitesDomain = $domainParts -join '.'
+
     # Exclude root site because it can take a very long time to get the list of users for the site
-    # Get domain for sites to support custom domain in sites' FQDN
-    $sitesDomain = $sites[0].Url.Substring(8,$sites[0].Url.IndexOf('/',8)-8)
-    $validSites = $sites | Where-Object {$_.url -match [regex]::Escape($sitesDomain)+"\/(sites|teams)"}
+    $validSites = $sites | Where-Object {$_.url -match [regex]::Escape($SpoSitesDomain)+"\/(sites|teams)"}
+    if ($IncludeOneDriveSites -eq $true) {
+        $validSites += $sites | Where-Object {$_.url -match [regex]::Escape($OdSitesDomain)+"\/personal"}
+    }
 	
 	$j = 1
-    foreach ($site in $validSites)
-    {
+    foreach ($site in $validSites) {
         Write-Progress -Activity "SharePoint Collection" -Status "Site Collection Properties ($j of $($validSites.Count))" -CurrentOperation "$($site.Url)" -PercentComplete ($j/$validSites.Count * 100)        
-		#if($site.Template -ne "GROUP#0")
-		#{
             Write-Verbose "$(Get-Date) connecting to site $($site.Url)"
             Write-Verbose "$(Get-Date) Get-SPOAdminList Processing $($site.Url)"
             # Grant permission to the site collection, if needed AND allowed
@@ -164,32 +178,33 @@ function Get-SPOAdminsList
 
             for($i=0; $i -lt $count; $i++)
             {
-				# Skip admin if listed only because of "admin needed"
-				if (-not($siteAdmins[$i].LoginName -eq $SpoAdmin -and $adminState -eq [SiteCollectionAdminState]::Needed)) {
-					# Include entry type
-					if ($siteAdmins[$i].IsGroup) {
-						$type = "Group"
-					}
-					else {
-						$type = "User"
-					}
-	                $AdminList += $siteAdmins[$i].DisplayName+" ($type)"
-				}
+                # Skip admin if listed only because of "admin needed"
+                if (-not($siteAdmins[$i].LoginName -eq $SpoAdmin -and $adminState -eq [SiteCollectionAdminState]::Needed)) {
+                    # Include entry type
+                    if ($siteAdmins[$i].IsGroup) {
+                        $type = "Group"
+                    }
+                    else {
+                        $type = "User"
+                    }
+                    $AdminList += $siteAdmins[$i].DisplayName+" ($type)"
+                }
             }
             
             $admins += New-Object PSObject -Property @{
                 Url=$($site.Url)
                 Admins=$(@($AdminList) -join ',')
             }
-			
-			Write-Host "$(Get-Date) Site: $($site.Url) SiteAdminCount: $($AdminList.Count)"
+            
+            Write-Host "$(Get-Date) Site: $($site.Url) SiteAdminCount: $($AdminList.Count)"
                         
             # Cleanup permission changes, if any
             Revoke-SiteCollectionAdmin -Site $site -AdminState $adminState
-        #}
-	$j++
+
+        $j++
     }
     $admins | Export-Csv "$OutputDir\SPOSiteAdmins.csv" -NoTypeInformation
+    Write-Host "$(Get-Date) Output saved to $OutputDir\SPOSiteAdmins.csv"
 
 }
 
