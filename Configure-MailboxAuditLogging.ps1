@@ -25,24 +25,27 @@
         
         2. For all mailboxes that do not have the recommended actions being logged, enable the
         the recommended actions (preserving any additional actions that are enabled). The recommended actions
-        are those enabled by default. (This phase can be skipped with the DoNotSetAuditActions parameter.)
+        are those enabled by default. (This phase can be included with the ConfigureAuditActions parameter.)
 
         You need to be connected to Exchange Online using the v2 management
         module in order for this script to run.  If the module is not installed,
         run Install-Module ExchangeOnlineManagement.
 
-    .PARAMETER  DoNotSetAuditActions
-        Switch to skip the second phase of the script, which sets the recommended actions to be logged.
+    .PARAMETER ConfigureAuditActions
+        Switch to also perform the second phase of the script, which sets the recommended actions to be logged.
+    .PARAMETER WhatIf
+        Switch causes the script to not make any changes, but still writes to the log file(s) the mailboxes
+        that would be updated.
     
     .NOTES
-        Version 2.1
-        March 24, 2021
+        Version 2.2
+        July 29, 2021
 #>
 
 #Requires -Module ExchangeOnlineManagement
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess)]
 Param (
-    [Switch]$DoNotSetAuditActions
+    [Switch]$ConfigureAuditActions
 )
 
 if (-not(Get-Command -Name Get-Mailbox -ErrorAction SilentlyContinue))
@@ -50,6 +53,7 @@ if (-not(Get-Command -Name Get-Mailbox -ErrorAction SilentlyContinue))
     throw "Please connect to Exchange Online before running this script."
     }
 
+$WhatIfPreference = $false
 $today = Get-Date -Format yyyyMMdd
 
 #Function that determines if a mailbox's actions that are being logged are at least the
@@ -121,7 +125,7 @@ Write-Host "$(Get-Date) Beginning phase 1..." -ForegroundColor Green
     Get relevant mailboxes:
 
     1.Those that do not have audit logging enabled, which applies only to resource mailboxes.
-    2.Those that are enabled by global auditing (aka on-by-default) but whose events
+    2.Those that are enabled by global audit logging (aka on-by-default) but whose events
       are not being sent to the Unified Audit Log, which are shared mailboxes and non-E5 user
       mailboxes that have not been explicitly enabled for audit logging.
 
@@ -151,7 +155,9 @@ if ($nonUALMailboxes.Count -gt 0)
             -PercentComplete ($i/$nonUALMailboxes.Count*100)
         Write-Verbose -Message "Enabling audit logging for $($mb.DisplayName)."
         #Manually/explicitly enable audit logging for the mailbox
-        Set-Mailbox -Identity $mb.DistinguishedName -AuditEnabled $true
+        if ($PSCmdlet.ShouldProcess($mb.UserPrincipalName,"Set-Mailbox -AuditEnabled `$true")) {
+            Set-Mailbox -Identity $mb.DistinguishedName -AuditEnabled $true
+        }
         $UALMailboxLog.Add($mb.UserPrincipalName) | Out-Null
         $i++
         }
@@ -162,7 +168,7 @@ if ($nonUALMailboxes.Count -gt 0)
     }
 Write-Host "$(Get-Date) Phase 1 is complete." -ForegroundColor Green
 
-if ($DoNotSetAuditActions -eq $false)
+if ($ConfigureAuditActions)
     {
     Write-Host "$(Get-Date) Beginning phase 2..." -ForegroundColor Green
     
@@ -229,8 +235,10 @@ if ($DoNotSetAuditActions -eq $false)
 
             #Configure the mailbox to use the default audit set for all logon types
             Write-Verbose -Message "Adding recommended actions for $($mb.DisplayName)."
-            Set-Mailbox -Identity $mb.DistinguishedName -DefaultAuditSet Admin,Delegate,Owner
-            
+            if ($PSCmdlet.ShouldProcess($mb.UserPrincipalName,"Set-Mailbox -DefaultAuditSet")) {
+                Set-Mailbox -Identity $mb.DistinguishedName -DefaultAuditSet Admin,Delegate,Owner
+            }
+
             #If additional actions were being logged, add them back
             #Actions being added that are already logged do not result in error
             if ($mb.HasCustomActions -eq $true) {
@@ -247,8 +255,10 @@ if ($DoNotSetAuditActions -eq $false)
                     $command = [ScriptBlock]::Create($command.ToString() + ' -AuditOwner @{add=$mb.AuditOwner}')
                 }
                 #Write-Verbose -Message "Command that will be executed to re-add custom actions: $command"
-                #Execute built command
-                &$command
+                #Execute built command only if WhatIf not used
+                if (-not($PSBoundParameters.ContainsKey('WhatIf'))) {
+                    &$command
+                }
             }
 
             $RecommendedActionsLog.Add($mb.UserPrincipalName) | Out-Null
@@ -263,6 +273,6 @@ if ($DoNotSetAuditActions -eq $false)
     }
 else
     {
-    Write-Host "$(Get-Date) Phase 2 has been skipped because the DoNotSetAuditActions switch was used." `
+    Write-Host "$(Get-Date) Phase 2 has been skipped because the ConfigureAuditActions switch was not used." `
         -ForegroundColor Green
     }
