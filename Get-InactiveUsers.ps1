@@ -108,12 +108,15 @@ Write-Host -ForegroundColor Green "$(Get-Date) Processing user data to prepare e
 
     foreach ($item in $result)
     {
-        $Return += New-Object -TypeName PSObject -Property @{
-            UserPrincipalName=$item.userprincipalname
-            AccountEnabled=$item.accountenabled
-            LastSignIn=$item.signinactivity.lastsignindatetime
-            UserType=$item.usertype
-        }
+	if ( $item.userPrincipalName -ne $null )
+	{
+		$Return += New-Object -TypeName PSObject -Property @{
+			UserPrincipalName=$item.userprincipalname
+			AccountEnabled=$item.accountenabled
+			LastSignIn=$item.signinactivity.lastsignindatetime
+			UserType=$item.usertype
+		}
+	}
     }
 
 # Exporting CSV
