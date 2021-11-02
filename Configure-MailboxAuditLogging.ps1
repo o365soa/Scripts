@@ -38,8 +38,8 @@
         that would be updated.
     
     .NOTES
-        Version 2.2
-        July 29, 2021
+        Version 2.3
+        October 23, 2021
 #>
 
 #Requires -Module ExchangeOnlineManagement
@@ -71,8 +71,7 @@ function Compare-AuditActions ($mailbox)
     $logonTypes = @('AuditOwner','AuditDelegate','AuditAdmin')
 
     #Set reference actions based on mailbox licensing
-    if ($mailbox.PersistedCapabilities -contains 'BPOS_S_EquivioAnalytics' `
-    -or $mailbox.PersistedCapabilities -contains 'M365Auditing') {
+    if ($mailbox.PersistedCapabilities -contains 'M365Auditing') {
         $AuditAdminActions = $E5AdminActions
         $AuditDelegateActions = $E5DelegateActions
         $AuditOwnerActions = $E5OwnerActions
@@ -137,7 +136,7 @@ Write-Host "$(Get-Date) Beginning phase 1..." -ForegroundColor Green
 Write-Host "$(Get-Date) Getting mailboxes whose events are not being sent to the Unified Audit Log..." `
     -ForegroundColor Green
 [array]$nonUALMailboxes = Get-EXOMailbox -ResultSize:Unlimited -Filter `
-    'AuditEnabled -ne $true -and PersistedCapabilities -ne "BPOS_S_EquivioAnalytics" -and PersistedCapabilities -ne "M365Auditing"'
+    'AuditEnabled -ne $true -and PersistedCapabilities -ne "M365Auditing"'
 
 Write-Host "$(Get-Date) $($nonUALMailboxes.Count) mailboxes were returned." `
     -ForegroundColor Green
