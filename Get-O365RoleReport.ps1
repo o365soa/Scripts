@@ -32,8 +32,8 @@
 	.PARAMETER Output
 		Path and filename of the report.  Default is O365RoleReport.html in the current directory.
 	.NOTES
-        Version 2.1
-		December 28, 2021
+        Version 2.2
+		January 6, 2022
 		
 		This script uses Bootstrap to format the report. For more information https://www.getbootstrap.com/
 
@@ -62,7 +62,7 @@ function Get-UserDetails ($id) {
     $mfaPhone = $user.StrongAuthenticationUserDetails.PhoneNumber
 
 	# Determine if cloud user
-    if ($null -eq $user.ImmutableID) {
+    if ($user.ImmutableID -eq $null) {
     	$type = "Cloud"
     }
 	else {
@@ -112,11 +112,16 @@ function Get-ExoRoleGroupMembers {
 			# Member is individual
 			if ($parentGroupName) {
 				Write-Verbose -Message "User in role group $parentGroupName assigned roles of $roleName role group: $($gMember.Name) ($($gMember.WindowsLiveId))"
+				$pgName = $parentGroupName + "\"
 			}
 			else {
 				Write-Verbose -Message "User assigned roles of $roleName role group: $($gMember.Name) ($($gMember.WindowsLiveId))"
+				$pgName = ""
 			}
-			$members += $gMember.ExternalDirectoryObjectId
+			$members += New-Object -TypeName PSObject -Property @{
+				Id = $gMember.ExternalDirectoryObjectId
+				ParentGroup = $pgName
+			}
 		}
 	}
 	return $members
@@ -145,11 +150,16 @@ function Get-ExoSecurityGroupMembers {
 			# Member is individual
 			if ($parentGroupName) {
 				Write-Verbose -Message "User in security group $parentGroupName assigned roles of $roleName role group: $($gMember.Name) ($($gMember.WindowsLiveId))"
+				$pgName = $parentGroupName + "\"
 			}
 			else {
 				Write-Verbose -Message "User assigned roles of $roleName role group: $($gMember.Name) ($($gMember.WindowsLiveId))"
+				$pgName = ""
 			}
-			$members += $gMember.ExternalDirectoryObjectId
+			$members += New-Object -TypeName PSObject -Property @{
+				Id = $gMember.ExternalDirectoryObjectId
+				ParentGroup = $pgName
+			}
 		}
 	}
 	return $members
@@ -245,7 +255,10 @@ if ($SkipWorkload -notcontains 'SCC') {
 				$mgm = Get-MsolGroupMember -GroupObjectId $sMember.ExternalDirectoryObjectId
 				foreach ($mMember in $mgm) {
 					Write-Verbose -Message "User in $($sMember.DisplayName) group assigned $($sccRole.Name) role: $($mMember.DisplayName) ($($mMember.EmailAddress))"
-					$roleUsers += $mMember.ObjectId.Guid
+					$roleUsers += New-Object -TypeName PSObject -Property @{
+						Id = $mMember.ObjectId.Guid
+						ParentGroup = $sMember.Displayname + "\"
+					}
 				}
 			}
 			else {
@@ -256,19 +269,22 @@ if ($SkipWorkload -notcontains 'SCC') {
 					$memberID = "No email address"
 				}
 				Write-Verbose -Message "User assigned $($sccRole.Name) role: $($sMember.Name) ($memberID)"
-				$roleUsers += $sMember.ExternalDirectoryObjectId
+				$roleUsers += New-Object -TypeName PSObject -Property @{
+					Id = $sMember.ExternalDirectoryObjectId
+					ParentGroup = ""
+				}
 			}
 		}
 
 	    # Iterate each user
-	    foreach ($userId in $roleUsers) {
+	    foreach ($user in $roleUsers) {
 			
 	        # Get underlying MSOL user details
-	        $mUser = Get-UserDetails -id $userId
+	        $mUser = Get-UserDetails -id $user.Id
 					
 			# Add to final object
 	        $pUsers += New-Object -TypeName PSObject -Property @{
-	            SignInName = $mUser.SignInName
+	            SignInName = $user.ParentGroup + $mUser.SignInName
 	            PasswordAge = $mUser.PasswordAge
 	            Role = $sccRole.Name
 	            MFADefault = $mUser.MFADefault
@@ -305,18 +321,21 @@ if ($SkipWorkload -notcontains 'EXO') {
 			# Type is user
 			Write-Verbose -Message "Processing role $($rm.Name)"
 			Write-Verbose -Message "User directly assigned $($rm.Name) role: $($rm.User)"
-			$roleUsers += (Get-User -Identity $rm.User).ExternalDirectoryObjectId
+			$roleUsers += New-Object -TypeName PSObject -Property @{
+				Id = @((Get-User -Identity $rm.User).ExternalDirectoryObjectId)[0]
+				ParentGroup = ""
+			}
 		}
 		
 	    # Iterate each user
-	    foreach ($userId in $roleUsers) {
+	    foreach ($user in $roleUsers) {
 			
 	        # Get underlying MSOL user details
-	        $mUser = Get-UserDetails -id $userId
+	        $mUser = Get-UserDetails -id $user.Id
 					
 			# Add to final object
 	        $pUsers += New-Object -TypeName PSObject -Property @{
-	            SignInName = $mUser.SignInName
+	            SignInName = $user.ParentGroup + $mUser.SignInName
 	            PasswordAge = $mUser.PasswordAge
 	            Role = $rm.Name
 	            MFADefault = $mUser.MFADefault
@@ -335,7 +354,7 @@ if ($pUsers.Count -gt 0) {
 	$Report += "<div class='jumbotron jumbotron-fluid'>
 	<div class='container'>
 	  <h1 class='display-4'>Office 365 Admin Role Assignment Report</h1>
-	  <p class='lead'>This report contains details of accounts assigned an administrative role in the following Office 365 workloads: $($workLoads -join ', '). <br>Generated on $((Get-Date).ToLocalTime())</p>
+	  <p class='lead'>This report contains details of accounts assigned an administrative role in the following Office 365 workloads: $($workLoads -join ', '). If an assignment is via group membership, the sign-in name is prefixed with the name of the group.<br>Generated on $((Get-Date).ToLocalTime())</p>
 	</div>
 	</div>"
 
@@ -375,7 +394,7 @@ if ($pUsers.Count -gt 0) {
 	        If($u.PasswordAge -ge $PasswordAgeThreshold) { $Class = "table-danger" } else { $Class = "table-success" }
 	        $Report += "<td class='$Class'>$($u.PasswordAge) Days</td>"
 
-	        If($null -eq $u.MFADefault) { $Class = "table-danger" } else { $Class = "table-success" }
+	        If($u.MFADefault -eq $null) { $Class = "table-danger" } else { $Class = "table-success" }
 	        $Report += "<td class='$Class'>$($u.MFADefault)</td>"
 
 	        $Report += "<td>$($u.MFAPhone)</td>"
