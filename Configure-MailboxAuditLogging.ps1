@@ -38,8 +38,8 @@
         that would be updated.
     
     .NOTES
-        Version 2.3
-        October 23, 2021
+        Version 2.3.1
+        February 8, 2022
 #>
 
 #Requires -Module ExchangeOnlineManagement
@@ -123,20 +123,22 @@ Write-Host "$(Get-Date) Beginning phase 1..." -ForegroundColor Green
 <#
     Get relevant mailboxes:
 
-    1.Those that do not have audit logging enabled, which applies only to resource mailboxes.
-    2.Those that are enabled by global audit logging (aka on-by-default) but whose events
-      are not being sent to the Unified Audit Log, which are shared mailboxes and non-E5 user
-      mailboxes that have not been explicitly enabled for audit logging.
+    1. Those that do not have audit logging enabled, which applies only to resource mailboxes.
+    2. Those that are enabled by global audit logging (aka on-by-default) but whose events
+       are not being sent to the Unified Audit Log, which are the following:
+       * Shared mailboxes
+       * User mailboxes that do not have M365 Advanced Auditing service plan assigned and
+         have not been explicitly enabled for audit logging
 
-      Important note: Only a server-side filter can be used to determine #2.  The
-      AuditEnabled property will always have a value of True, so it requires Exchange to determine
-      mailboxes that are implicitly True because of global auditing or explicitly True via
-      the Set-Mailbox cmdlet.
+    Important note: Only a server-side filter can be used to determine #2.  The
+    AuditEnabled property will always have a value of True, so it requires Exchange to determine
+    mailboxes that are implicitly True because of global audit logging or explicitly True via
+    the Set-Mailbox cmdlet.
 #>
 Write-Host "$(Get-Date) Getting mailboxes whose events are not being sent to the Unified Audit Log..." `
     -ForegroundColor Green
 [array]$nonUALMailboxes = Get-EXOMailbox -ResultSize:Unlimited -Filter `
-    'AuditEnabled -ne $true -and PersistedCapabilities -ne "M365Auditing"'
+    'AuditEnabled -ne $true -and ((RecipientTypeDetails -eq "UserMailbox" -and PersistedCapabilities -ne "M365Auditing") -or (RecipientTypeDetails -ne "UserMailbox"))'
 
 Write-Host "$(Get-Date) $($nonUALMailboxes.Count) mailboxes were returned." `
     -ForegroundColor Green
