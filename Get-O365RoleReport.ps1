@@ -31,9 +31,12 @@
 		Array of roles to exclude from the report.  Default is AAD role of "Directory Synchronization Accounts".
 	.PARAMETER Output
 		Path and filename of the report.  Default is O365RoleReport.html in the current directory.
+    .PARAMETER UseIEProxyConfig
+        When a proxy is required, you may need to use the proxy configuration from IE to connect.
+        This creates a PSSession Option which is used for Remote PowerShell.
 	.NOTES
-        Version 2.2
-		January 6, 2022
+        Version 2.3
+		April 27, 2022
 		
 		This script uses Bootstrap to format the report. For more information https://www.getbootstrap.com/
 
@@ -45,7 +48,8 @@ Param(
     [String]$Output = "O365RoleReport.html",
     [Array]$IgnoredRoles="Directory Synchronization Accounts",
 	[ValidateSet('AAD','SCC','EXO')]$SkipWorkload,
-	[string]$AdminUPN
+	[string]$AdminUPN,
+    [Switch]$UseIEProxyConfig
 )
 
 
@@ -175,6 +179,13 @@ if ($SkipWorkload -contains 'AAD' -and $SkipWorkload -contains 'SCC' -and $SkipW
 	exit
 }
 
+If ($UseIEProxyConfig) {
+    Write-Host "$(Get-Date) [INFO] Engineer has specified using IE Proxy Settings" -ForegroundColor Green
+    $ProxySetting = New-PSSessionOption -ProxyAccessType IEConfig -IdleTimeout 9000000 -OperationTimeout 9000000
+} Else {
+    $ProxySetting = New-PSSessionOption -ProxyAccessType None -IdleTimeout 9000000 -OperationTimeout 9000000
+}
+
 # Always connect to MSOL, if necessary, for password and MFA details. MSOL still required due to MFA details not available in AAD v2.
 if (-not(Get-MsolCompanyInformation -ErrorAction SilentlyContinue)) {
 	Write-Host 'Connecting to Azure AD...'
@@ -186,7 +197,7 @@ if (-not(Get-MsolCompanyInformation -ErrorAction SilentlyContinue)) {
 if ($SkipWorkload -notcontains 'SCC') {
 	if (-not(Get-Command -Name Get-SCCRoleGroup -ErrorAction SilentlyContinue)) {
 			Write-Host 'Connecting to Security & Compliance Center...'
-			Connect-IPPSSession -Prefix SCC -UserPrincipalName $AdminUPN
+			Connect-IPPSSession -Prefix SCC -UserPrincipalName $AdminUPN -PSSessionOption $ProxySetting
 	}
 }
 
@@ -194,7 +205,7 @@ if ($SkipWorkload -notcontains 'SCC') {
 if ($SkipWorkload -notcontains 'EXO') {
 	if (-not(Get-Command -Name Get-OrganizationConfig -ErrorAction SilentlyContinue)) {
 		Write-Host 'Connecting to Exchange Online...'
-		Connect-ExchangeOnline -UserPrincipalName $AdminUPN -ShowBanner:$false
+		Connect-ExchangeOnline -UserPrincipalName $AdminUPN -ShowBanner:$false -PSSessionOption $ProxySetting
 	}
 }
 
