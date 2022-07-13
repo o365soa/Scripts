@@ -38,8 +38,8 @@
         that would be updated.
     
     .NOTES
-        Version 2.3.1
-        February 8, 2022
+        Version 2.3.2
+        July 13, 2022
 #>
 
 #Requires -Module ExchangeOnlineManagement
@@ -56,18 +56,18 @@ if (-not(Get-Command -Name Get-Mailbox -ErrorAction SilentlyContinue))
 $WhatIfPreference = $false
 $today = Get-Date -Format yyyyMMdd
 
+#Actions enabled by default for logon types and licensing
+[System.Collections.ArrayList]$NonE5OwnerActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','UpdateFolderPermissions','UpdateInboxRules','UpdateCalendarDelegation','ApplyRecord'
+[System.Collections.ArrayList]$NonE5DelegateActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','SendAs','SendOnBehalf','Create','UpdateFolderPermissions','UpdateInboxRules','ApplyRecord'
+[System.Collections.ArrayList]$NonE5AdminActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','SendAs','SendOnBehalf','Create','UpdateFolderPermissions','UpdateInboxRules','UpdateCalendarDelegation','ApplyRecord'
+[System.Collections.ArrayList]$E5OwnerActions = $NonE5OwnerActions + 'MailItemsAccessed','Send'
+[System.Collections.ArrayList]$E5DelegateActions = $NonE5DelegateActions + 'MailItemsAccessed'
+[System.Collections.ArrayList]$E5AdminActions = $NonE5AdminActions + 'MailItemsAccessed','Send'
+
 #Function that determines if a mailbox's actions that are being logged are at least the
 #ones that are recommended
 function Compare-AuditActions ($mailbox)
     {
-    #Actions enabled by default for logon types and licensing
-    [System.Collections.ArrayList]$NonE5OwnerActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','UpdateFolderPermissions','UpdateInboxRules','UpdateCalendarDelegation','ApplyRecord'
-    [System.Collections.ArrayList]$NonE5DelegateActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','SendAs','SendOnBehalf','Create','UpdateFolderPermissions','UpdateInboxRules','ApplyRecord'
-    [System.Collections.ArrayList]$NonE5AdminActions = 'Update','MoveToDeletedItems','SoftDelete','HardDelete','SendAs','SendOnBehalf','Create','UpdateFolderPermissions','UpdateInboxRules','UpdateCalendarDelegation','ApplyRecord'
-    [System.Collections.ArrayList]$E5OwnerActions = $NonE5OwnerActions + 'MailItemsAccessed','Send'
-    [System.Collections.ArrayList]$E5DelegateActions = $NonE5DelegateActions + 'MailItemsAccessed'
-    [System.Collections.ArrayList]$E5AdminActions = $NonE5AdminActions + 'MailItemsAccessed','Send'
-    
     $logonTypes = @('AuditOwner','AuditDelegate','AuditAdmin')
 
     #Set reference actions based on mailbox licensing
@@ -209,6 +209,7 @@ if ($ConfigureAuditActions)
                     AuditAdmin = $mb.AuditAdmin
                     AuditDelegate = $mb.AuditDelegate
                     AuditOwner = $mb.AuditOwner
+                    PersistedCapabilities = $mb.PersistedCapabilities
                 }
 
             $nonDefaultActionsMB.Add($mbToAdd) | Out-Null
@@ -247,7 +248,23 @@ if ($ConfigureAuditActions)
                 #Build command based on logon types that need actions re-added
                 $command = {Set-Mailbox -Identity $mb.DistinguishedName}
                 if ($mb.HasCustomActionsAdmin -eq $true) {
-                    $command = [ScriptBlock]::Create($command.ToString() + ' -AuditAdmin @{add=$mb.AuditAdmin}')
+                    #MessageBind cannot be added if M365Auditing service plan assigned. MailItemsAccessed
+                    #is to be used instead, which is enabled by default. Therefore, remove MessageBind
+                    #from list, if present and if the service plan is assigned, to avoid error
+                    if ($mb.PersistedCapabilities -contains 'M365Auditing' -and $mb.AuditAdmin -contains 'MessageBind') {
+                        Write-Verbose "Removing MessageBind as a custom action to re-add for AuditAdmin for $($mb.DisplayName) because the mailbox has the M365 Advanced Auditing service plan assigned."
+                        $mb.AuditAdmin = $mb.AuditAdmin | Where-Object {$_ -ne 'MessageBind'}
+                        #Only add AuditAdmin if additional custom actions besides MessageBind were enabled (to avoid error)
+                        if (Compare-Object -ReferenceObject $E5AdminActions -DifferenceObject $mb.AuditAdmin  | Where-Object {$_.SideIndicator -eq '=>'}) {
+                            $command = [ScriptBlock]::Create($command.ToString() + ' -AuditAdmin @{add=$mb.AuditAdmin}')
+                        }
+                        else {
+                            $mb.HasCustomActionsAdmin = $false
+                        }
+                    }
+                    else {
+                        $command = [ScriptBlock]::Create($command.ToString() + ' -AuditAdmin @{add=$mb.AuditAdmin}')   
+                    }  
                 }
                 if ($mb.HasCustomActionsDelegate -eq $true) {
                     $command = [ScriptBlock]::Create($command.ToString() + ' -AuditDelegate @{add=$mb.AuditDelegate}')
@@ -255,10 +272,16 @@ if ($ConfigureAuditActions)
                 if ($mb.HasCustomActionsOwner -eq $true) {
                     $command = [ScriptBlock]::Create($command.ToString() + ' -AuditOwner @{add=$mb.AuditOwner}')
                 }
-                #Write-Verbose -Message "Command that will be executed to re-add custom actions: $command"
-                #Execute built command only if WhatIf not used
-                if (-not($PSBoundParameters.ContainsKey('WhatIf'))) {
-                    &$command
+                #Determine if command still needs to be run (because MessageBind may have been removed above)
+                if ($mb.HasCustomActionsAdmin -eq $true -or $mb.HasCustomActionsDelegate -eq $true -or $mb.HasCustomActionsOwner -eq $true) {
+                    #Execute built command only if WhatIf not used
+                    Write-Verbose -Message "Command that will be executed to re-add custom actions: $command"
+                    if (-not($PSBoundParameters.ContainsKey('WhatIf'))) {
+                        &$command
+                    }
+                }
+                else {
+                    Write-Verbose "Skipping re-adding custom actions for $($mb.DisplayName) because there are no custom actions to add (after removing MessageBind for AuditAdmin, which is not applicable)."
                 }
             }
 
