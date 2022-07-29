@@ -51,35 +51,39 @@ Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
     Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds to let the Graph secret settle. This prevents a race condition"
     Start-sleep 60
     
-    # Use ADAL Library - requires AzureAD module to be installed
-    
-    $AadModule = Get-Module -Name "AzureADPreview" -ListAvailable
-    
-    $Latest_Version = ($AadModule | Select-Object version | Sort-Object)[-1]
-    $aadModule      = $AadModule | Where-Object { $_.version -eq $Latest_Version.version }
-    $adal           = Join-Path $AadModule.ModuleBase "Microsoft.IdentityModel.Clients.ActiveDirectory.dll"
-    $adalforms      = Join-Path $AadModule.ModuleBase "Microsoft.IdentityModel.Clients.ActiveDirectory.Platform.dll"
-    
-    [System.Reflection.Assembly]::LoadFrom($adal) | Out-Null
-    [System.Reflection.Assembly]::LoadFrom($adalforms) | Out-Null
-    
+    # Find a suitable MSAL library - Requires that the ExchangeOnlineManagement module is installed
+    $ExoModule = Get-Module -Name "ExchangeOnlineManagement" -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
+
+    # Add support for the .Net Core version of the library. Variable doesn't exist in PowerShell v4 and below, 
+    # so if it doesn't exist it is assumed that 'Desktop' edition is used
+    If ($PSEdition -eq 'Core'){
+        $Folder = "netCore"
+    } Else {
+        $Folder = "NetFramework"
+    }
+
+    $MSAL = Join-Path $ExoModule.ModuleBase "$($Folder)\Microsoft.Identity.Client.dll"
+    Write-Verbose "$(Get-Date) Loading module from $MSAL"
+    Try {Add-Type -LiteralPath $MSAL | Out-Null} Catch {} # Load the MSAL library
+
     # Get a token
 
     Write-Host -ForegroundColor Green "$(Get-Date) Getting an access token"
     
     $GraphAppDomain     = (Get-AzureADTenantDetail | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.Initial }).Name
     $authority          = "https://login.microsoftonline.com/$graphappdomain"
-    $authContext        = New-Object "Microsoft.IdentityModel.Clients.ActiveDirectory.AuthenticationContext" -ArgumentList $authority
     $resource           = "https://graph.microsoft.com"
-    
-    $authContext.TokenCache.Clear()
-    
-    $ClientCredential   = New-Object "Microsoft.IdentityModel.Clients.ActiveDirectory.ClientCredential" -ArgumentList @($clientID,$secret.value)
-    $authResult         = $authContext.AcquireTokenAsync($Resource,$ClientCredential)
-    
-    # Set headers
-    
-    $GraphAuthHeader = @{'Authorization'="$($authresult.result.AccessTokenType) $($authresult.result.AccessToken)"}
+        
+    $ccApp = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($ClientID).WithClientSecret($Secret.Value).WithAuthority($Authority).Build()
+
+    $Scopes = New-Object System.Collections.Generic.List[string]
+    $Scopes.Add("$($Resource)/.default")
+
+    $Token = $ccApp.AcquireTokenForClient($Scopes).ExecuteAsync().GetAwaiter().GetResult()
+    If ($Token){Write-Verbose "$(Get-Date) Successfully got a token using MSAL for $($Resource)"}
+
+    # Set authentication headers
+    $GraphAuthHeader = @{'Authorization'="$($Token.TokenType) $($Token.AccessToken)"}
 
 # Get Graph data and continue paging until data collection is complete
 
