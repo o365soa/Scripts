@@ -28,6 +28,7 @@
 	.LINK
 		about_functions_advanced   
 #>
+#Requires -Modules AzureADPreview, ExchangeOnlineManagement
 
 Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
 
