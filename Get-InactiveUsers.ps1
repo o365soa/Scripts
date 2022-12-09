@@ -132,4 +132,14 @@ Write-Host -ForegroundColor Green "$(Get-Date) Exporting AAD-InactiveUsers.csv i
 
 Write-Host ("")
 
+# Remove client secret
+$secrets = Get-AzureADApplicationPasswordCredential -ObjectId $GraphApp.ObjectId
+foreach ($secret in $secrets) {
+    # Suppress errors in case a secret no longer exists
+    try {
+        Remove-AzureADApplicationPasswordCredential -ObjectId $GraphApp.ObjectId -KeyId $secret.KeyId
+    }
+    catch {}
+}
+
 Stop-Transcript
