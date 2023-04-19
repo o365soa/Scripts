@@ -4,7 +4,7 @@ This folder contains sample scripts to help you get additional information from 
 
 Get-SPOSiteAdmins.ps1
 
-This script iterates through all the SharePoint Online site collections with a /sites or /teams path and gets the list of admin entries for each site. If the user running the script does not have site admin permission to the site collection, the script will add the user as a site admin to the site collection and then remove the user after the site has been checked.
+This script iterates through all the SharePoint Online sites with a starting path of /sites/ or /teams/ and gets the list of admins for each site. If the user running the script does not have site admin permission to the site, the script will add the user as a site admin, get the list of site admins, and then remove the user (unless opted out). Group membership will be expanded if that option is used.
 
 # Disclaimer
 
