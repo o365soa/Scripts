@@ -474,7 +474,7 @@ if ($ExpandGroups) {
     if (Get-Module -Name AzureADPreview -ListAvailable) {
         Import-Module AzureADPreview
         Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Azure AD. Use an administrator account with owner permission to the SOA application."
-        Connect-AzureAD -AccountId $SPOAdmin
+        Connect-AzureAD -AccountId $SPOAdmin | Out-Null
     }
     else {
         throw "The AzureADPreview module is required when ExpandGroups is True."
