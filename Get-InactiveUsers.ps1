@@ -90,16 +90,15 @@ Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
 
 Write-Host -ForegroundColor Green "$(Get-Date) Get Graph data and continue paging until data collection is complete"
 
-    $targetdate = (Get-Date).AddDays(-30)
-    $targetdatestr = $targetdate.ToString("yyyy-MM-dd")
+    $targetdate = (Get-Date).AddDays(-30).ToString("yyyy-MM-dd")
 
     $Result = @()
-    $ApiUrl = "https://graph.microsoft.com/beta/users?`$filter=signInActivity/lastSignInDateTime lt $targetdatestr&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
+    $ApiUrl = "https://graph.microsoft.com/beta/users?`$filter=signInActivity/lastSignInDateTime lt $($targetdate)T00:00:00Z&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
     $Response = Invoke-RestMethod -Headers $GraphAuthHeader -Uri $ApiUrl -Method Get
     $Users = $Response.value
     $Result = $Users
     
-    While ($Response.'@odata.nextLink' -ne $null) {
+    While ($null -ne $Response.'@odata.nextLink') {
     $Response = Invoke-RestMethod -Headers $GraphAuthHeader -Uri $Response.'@odata.nextLink' -Method Get
     $Users = $Response.value
     $Result += $Users
@@ -113,7 +112,7 @@ Write-Host -ForegroundColor Green "$(Get-Date) Processing user data to prepare e
 
     foreach ($item in $result)
     {
-	if ( $item.userPrincipalName -ne $null )
+	if ( $null -ne $item.userPrincipalName )
 	{
 		$Return += New-Object -TypeName PSObject -Property @{
 			UserPrincipalName=$item.userprincipalname
