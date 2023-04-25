@@ -19,119 +19,129 @@
         This script is designed to collect a list of users who have not signed in for 30 days or more.
         The Office 365: Security Optimization Assessment Azure AD application must exist 
         for this to function.
+
+    .PARAMETER SignInType
+        Filter users on interactive or non-interactive sign-ins. Valid value is Interactive or NonInterctive.
+        Interactive is the default.
         
 	.NOTES
-		Emily Coates
-		Customer Engineer - Microsoft
-		emily.coates@microsoft.com
+        Version 1.2
+        April 22, 2023
 
 	.LINK
 		about_functions_advanced   
 #>
 #Requires -Modules AzureADPreview, ExchangeOnlineManagement
+[CmdletBinding()]
+param (
+    [ValidateSet('Interactive','NonInteractive')]$SignInType = 'Interactive'
+)
 
 Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
 
-    # Connect to Azure AD. This is required to get the access token.    
-    
-    Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Azure AD. Use an administrative account with the ability to manage Azure AD Applications"
-    
-    Import-Module AzureADPreview
-    Connect-AzureAD
-    
-    # Get the AzureAD Application and create a secret
-    
-    Write-Host -ForegroundColor Green "$(Get-Date) Creating a new 48 hour secret for the SOA application"
-    
-    $GraphApp = Get-AzureADApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'"
-    $clientID = $GraphApp.AppId
-    $secret = New-AzureADApplicationPasswordCredential -ObjectId $GraphApp.ObjectId -EndDate (Get-Date).AddDays(2) -CustomKeyIdentifier "$(Get-Date -Format "dd-MMM-yyyy")"
-    
-    # Let the secret settle
-    
-    Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds to let the Graph secret settle. This prevents a race condition"
-    Start-sleep 60
-    
-    # Find a suitable MSAL library - Requires that the ExchangeOnlineManagement module is installed
-    $ExoModule = Get-Module -Name "ExchangeOnlineManagement" -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
+# Connect to Azure AD. This is required to get the access token.    
 
-    # Add support for the .Net Core version of the library. Variable doesn't exist in PowerShell v4 and below, 
-    # so if it doesn't exist it is assumed that 'Desktop' edition is used
-    If ($PSEdition -eq 'Core'){
-        $Folder = "netCore"
-    } Else {
-        $Folder = "NetFramework"
-    }
+Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Azure AD. Use an account with the ability to manage Azure AD applications."
 
-    $MSAL = Join-Path $ExoModule.ModuleBase "$($Folder)\Microsoft.Identity.Client.dll"
-    Write-Verbose "$(Get-Date) Loading module from $MSAL"
-    Try {Add-Type -LiteralPath $MSAL | Out-Null} Catch {} # Load the MSAL library
+Import-Module AzureADPreview
+Connect-AzureAD
 
-    # Get a token
+# Get the AzureAD Application and create a secret
 
-    Write-Host -ForegroundColor Green "$(Get-Date) Getting an access token"
+Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application."
+
+$GraphApp = Get-AzureADApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'"
+$clientID = $GraphApp.AppId
+$secret = New-AzureADApplicationPasswordCredential -ObjectId $GraphApp.ObjectId -EndDate (Get-Date).AddDays(2) -CustomKeyIdentifier "$(Get-Date -Format "dd-MMM-yyyy")"
+
+# Let the secret settle
+
+Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds to let the client secret replicate."
+Start-sleep 60
+
+# Find a suitable MSAL library - Requires that the ExchangeOnlineManagement module is installed
+$ExoModule = Get-Module -Name "ExchangeOnlineManagement" -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
+
+# Add support for the .Net Core version of the library. Variable doesn't exist in PowerShell v4 and below, 
+# so if it doesn't exist it is assumed that 'Desktop' edition is used
+If ($PSEdition -eq 'Core'){
+    $Folder = "netCore"
+} Else {
+    $Folder = "NetFramework"
+}
+
+$MSAL = Join-Path $ExoModule.ModuleBase "$($Folder)\Microsoft.Identity.Client.dll"
+Write-Verbose "$(Get-Date) Loading module from $MSAL"
+Try {Add-Type -LiteralPath $MSAL | Out-Null} Catch {} # Load the MSAL library
+
+# Get a token
+
+Write-Host -ForegroundColor Green "$(Get-Date) Getting an access token"
+
+$GraphAppDomain     = (Get-AzureADTenantDetail | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.Initial }).Name
+$authority          = "https://login.microsoftonline.com/$graphappdomain"
+$resource           = "https://graph.microsoft.com"
     
-    $GraphAppDomain     = (Get-AzureADTenantDetail | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.Initial }).Name
-    $authority          = "https://login.microsoftonline.com/$graphappdomain"
-    $resource           = "https://graph.microsoft.com"
-        
-    $ccApp = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($ClientID).WithClientSecret($Secret.Value).WithAuthority($Authority).Build()
+$ccApp = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($ClientID).WithClientSecret($Secret.Value).WithAuthority($Authority).Build()
 
-    $Scopes = New-Object System.Collections.Generic.List[string]
-    $Scopes.Add("$($Resource)/.default")
+$Scopes = New-Object System.Collections.Generic.List[string]
+$Scopes.Add("$($Resource)/.default")
 
-    $Token = $ccApp.AcquireTokenForClient($Scopes).ExecuteAsync().GetAwaiter().GetResult()
-    If ($Token){Write-Verbose "$(Get-Date) Successfully got a token using MSAL for $($Resource)"}
+$Token = $ccApp.AcquireTokenForClient($Scopes).ExecuteAsync().GetAwaiter().GetResult()
+If ($Token){Write-Verbose "$(Get-Date) Successfully got a token using MSAL for $($Resource)"}
 
-    # Set authentication headers
-    $GraphAuthHeader = @{'Authorization'="$($Token.TokenType) $($Token.AccessToken)"}
+# Set authentication headers
+$GraphAuthHeader = @{'Authorization'="$($Token.TokenType) $($Token.AccessToken)"}
 
 # Get Graph data and continue paging until data collection is complete
 
 Write-Host -ForegroundColor Green "$(Get-Date) Get Graph data and continue paging until data collection is complete"
 
-    $targetdate = (Get-Date).AddDays(-30).ToString("yyyy-MM-dd")
+$targetdate = (Get-Date).AddDays(-30).ToString("yyyy-MM-dd")
 
-    $Result = @()
-    $ApiUrl = "https://graph.microsoft.com/beta/users?`$filter=signInActivity/lastSignInDateTime lt $($targetdate)T00:00:00Z&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
-    $Response = Invoke-RestMethod -Headers $GraphAuthHeader -Uri $ApiUrl -Method Get
-    $Users = $Response.value
-    $Result = $Users
-    
-    While ($null -ne $Response.'@odata.nextLink') {
-    $Response = Invoke-RestMethod -Headers $GraphAuthHeader -Uri $Response.'@odata.nextLink' -Method Get
-    $Users = $Response.value
-    $Result += $Users
-    }
+$Result = @()
+if ($SignInType -eq 'Interactive') {
+    $siFilter = 'signInActivity/lastSignInDateTime'
+}
+else {
+    $siFilter = 'signInActivity/lastNonInteractiveSignInDateTime'
+}
+$ApiUrl = "https://graph.microsoft.com/beta/users?`$filter=$siFilter lt $($targetdate)T00:00:00Z&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
+$Response = Invoke-RestMethod -Headers $GraphAuthHeader -Uri $ApiUrl -Method Get
+$Users = $Response.value
+$Result = $Users
+
+While ($null -ne $Response.'@odata.nextLink') {
+$Response = Invoke-RestMethod -Headers $GraphAuthHeader -Uri $Response.'@odata.nextLink' -Method Get
+$Users = $Response.value
+$Result += $Users
+}
 
 # Processing user data to prepare export
 
 Write-Host -ForegroundColor Green "$(Get-Date) Processing user data to prepare export"
 
-    $return=@()
+$return=@()
 
-    foreach ($item in $result)
-    {
-	if ( $null -ne $item.userPrincipalName )
-	{
-		$Return += New-Object -TypeName PSObject -Property @{
-			UserPrincipalName=$item.userprincipalname
-			AccountEnabled=$item.accountenabled
-			LastSignIn=$item.signinactivity.lastsignindatetime
-			UserType=$item.usertype
-		}
-	}
+foreach ($item in $result) {
+    if ( $null -ne $item.userPrincipalName -and $item.accountEnabled -eq $true) {
+        $Return += New-Object -TypeName PSObject -Property @{
+            UserPrincipalName=$item.userprincipalname
+            LastInteractiveSignIn=$item.signinactivity.lastsignindatetime
+            LastNonInteractiveSignInDateTime=$item.signinactivity.lastNonInteractiveSignInDateTime
+            UserType=$item.usertype
+        }
     }
+}
 
 # Exporting CSV
 
-Write-Host -ForegroundColor Green "$(Get-Date) Exporting AAD-InactiveUsers.csv in current directory"  
+Write-Host -ForegroundColor Green "$(Get-Date) Exporting AAD-InactiveUsers.csv in current directory."  
 
-    $return | Export-CSV AAD-InactiveUsers.csv -NoTypeInformation
-
-Write-Host ("")
+$return | Select-Object -Property UserPrincipalName,UserType,LastInteractiveSignIn,LastNonInteractiveSignInDateTime | Export-CSV AAD-InactiveUsers.csv -NoTypeInformation
 
 # Remove client secret
+Write-Host -ForegroundColor Green "$(Get-Date) Removing client secrets for the SOA application."
 $secrets = Get-AzureADApplicationPasswordCredential -ObjectId $GraphApp.ObjectId
 foreach ($secret in $secrets) {
     # Suppress errors in case a secret no longer exists
