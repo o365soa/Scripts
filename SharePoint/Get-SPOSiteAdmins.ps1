@@ -42,8 +42,8 @@
         Get the membership of a group (including recursion) assigned site admin. The Azure AD Preview module and the SOA Azure AD
         application are required.
 	.Notes
-		Version: 2.2
-		Date: April 6, 2023
+		Version: 2.3
+		Date: April 28, 2023
 #>
 
 Param(
@@ -284,7 +284,14 @@ function Get-GroupMembers {
         else {
             # Beta endpoint is used because service principals are not included in response in v1.0
             # 100 members are returned by default. Can use $top to get up to 999
-            $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$Id/transitiveMembers?`$top=999" -ClientID $AzureADApp.AppId -ClientSecret $AzureADAppCred -TenantDomain $AppDomain | ConvertFrom-Json).value
+            # If M365 Group, drop _o from end of GUID for site owner group and get only the owners
+            if ($id.Length -eq 38) {
+                $lookupId = $id.Substring(0,36)
+                $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$lookupId/owners?`$top=999" -ClientID $AzureADApp.AppId -ClientSecret $AzureADAppCred -TenantDomain $AppDomain | ConvertFrom-Json).value
+            }
+            else {
+                $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$Id/transitiveMembers?`$top=999" -ClientID $AzureADApp.AppId -ClientSecret $AzureADAppCred -TenantDomain $AppDomain | ConvertFrom-Json).value
+            }
             $memberIds = @()
             foreach ($member in ($groupMembers | Where-Object {$_."@odata.type" -ne '#microsoft.graph.group'})) {
                 switch ($member."@odata.type") {
@@ -293,7 +300,7 @@ function Get-GroupMembers {
                     default {$memberIds += $member.Id}
                 }
             }
-            Write-Verbose -Message "$(Get-Date) $DisplayName contains $($memberIds.Count) transitive members."
+            Write-Verbose -Message "$(Get-Date) $DisplayName contains $($memberIds.Count) owners or transitive members."
         }
         # Add the group and membership to hash table
         $script:groupMembers.Add($Id,$memberIds)
@@ -404,14 +411,7 @@ function Get-SPOAdminsList
                     foreach ($entry in $siteAdminEntries) {
                         if ($entry.IsGroup -eq $true) {
                             Write-Verbose -Message "$(Get-Date) Site admin entry `"$($entry.DisplayName)`" is a group. Expanding members."
-                            # Drop _o from end of GUID for site owner group
-                            if ($entry.LoginName.Length -eq 38) {
-                                $id = $entry.LoginName.Substring(0,36)
-                            }
-                            else {
-                                $id = $entry.LoginName
-                            }
-                            [array]$groupMembers = Get-GroupMembers -Id $id -DisplayName $entry.DisplayName 
+                            [array]$groupMembers = Get-GroupMembers -Id $entry.LoginName -DisplayName $entry.DisplayName 
                             $siteAdminGroups += $entry.DisplayName + ' (' + $($groupMembers -join ' ') + ')'
                         }
                         else {
