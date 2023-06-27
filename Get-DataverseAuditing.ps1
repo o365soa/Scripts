@@ -83,7 +83,8 @@ foreach ($instance in $Environments) {
     $apiUrl = $instance.Internal.properties.linkedEnvironmentMetadata.instanceApiUrl
     Write-Verbose "Environment: $($instance.DisplayName)"
 
-    if ($apiUrl -and $instance.Internal.properties.linkedEnvironmentMetadata.instanceState -eq 'Ready') {
+    # Connect to DV if environment is active (Ready) and not a Teams-only environment
+    if ($apiUrl -and $instance.Internal.properties.linkedEnvironmentMetadata.instanceState -eq 'Ready' -and $instance.Internal.properties.linkedEnvironmentMetadata.platformSku -ne 'Lite') {
         $scope = New-Object System.Collections.Generic.List[string]
         $scope.Add("$apiUrl/.default")
 
