@@ -12,10 +12,10 @@
 ##############################################################################################
 
 <#
-	.SYNOPSIS
-		Power Platform Dataverse auditing script
+    .SYNOPSIS
+        Power Platform Dataverse auditing script
 
-	.DESCRIPTION
+    .DESCRIPTION
         This script is designed to collect a list of Power Platform Dataverse environments
         which are not configured to audit all event types.
         The 'Office 365: Security Optimization Assessment' Azure AD application must exist 
@@ -31,15 +31,15 @@
     .EXAMPLE
         PS C:\> .\Get-DataverseAuditing.ps1 -EnableAuditing $True
         
-	.NOTES
+    .NOTES
         Version 1.0
         21 June 2023
 
         Jonathan Devere-Ellery
         Cloud Solution Architect - Microsoft
 
-	.LINK
-		about_functions_advanced   
+    .LINK
+        about_functions_advanced   
 #>
 
 #Requires -Version 5
