@@ -13,50 +13,50 @@
 
 <#
 	.SYNOPSIS
-		Inactive users standalone script
+		Get users via Microsoft Graph based on sign-in activity
 
 	.DESCRIPTION
-        This script is designed to collect a list of users who have not signed in for 30 days or more.
-        The Office 365: Security Optimization Assessment Azure AD application must exist 
-        for this to function.
+        This script will retrieve a list of users who have not signed in for at least 30 days.
+        Note: The "Office 365 Security Optimization Assessment" Azure AD application must exist 
+        for this script to work.
 
     .PARAMETER SignInType
         Filter users on interactive or non-interactive sign-ins. Valid value is Interactive or NonInterctive.
         Interactive is the default.
         
 	.NOTES
-        Version 1.2
-        April 22, 2023
+        Version 1.3
+        June 29, 2023
 
 	.LINK
 		about_functions_advanced   
 #>
-#Requires -Modules AzureADPreview, ExchangeOnlineManagement
+#Requires -Modules ExchangeOnlineManagement, Microsoft.Graph.Authentication, Microsoft.Graph.Applications
 [CmdletBinding()]
 param (
     [ValidateSet('Interactive','NonInteractive')]$SignInType = 'Interactive'
 )
 
-Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
+# Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
 
-# Connect to Azure AD. This is required to get the access token.    
-
-Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Azure AD. Use an account with the ability to manage Azure AD applications."
-
-Import-Module AzureADPreview
-Connect-AzureAD
+Connect-MgGraph -ContextScope Process -Scopes 'Application.ReadWrite.All','User.Read'
 
 # Get the AzureAD Application and create a secret
 
-Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application."
+Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application..."
 
-$GraphApp = Get-AzureADApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'"
-$clientID = $GraphApp.AppId
-$secret = New-AzureADApplicationPasswordCredential -ObjectId $GraphApp.ObjectId -EndDate (Get-Date).AddDays(2) -CustomKeyIdentifier "$(Get-Date -Format "dd-MMM-yyyy")"
+$GraphApp = Get-MgApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'" | Where-Object {$_.Web.RedirectUris -Contains "https://security.optimization.assessment.local"}
+
+$Params = @{
+    displayName = "Task on $(Get-Date -Format "dd-MMM-yyyy")"
+    endDateTime = (Get-Date).AddDays(2)
+}
+
+$Secret = Add-MgApplicationPassword -ApplicationId $GraphApp.Id -PasswordCredential $Params
 
 # Let the secret settle
 
-Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds to let the client secret replicate."
+Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds to allow for client secret replication..."
 Start-sleep 60
 
 # Find a suitable MSAL library - Requires that the ExchangeOnlineManagement module is installed
@@ -76,28 +76,25 @@ Try {Add-Type -LiteralPath $MSAL | Out-Null} Catch {} # Load the MSAL library
 
 # Get a token
 
-Write-Host -ForegroundColor Green "$(Get-Date) Getting an access token"
+# Write-Host -ForegroundColor Green "$(Get-Date) Getting an access token"
 
-$GraphAppDomain     = (Get-AzureADTenantDetail | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.Initial }).Name
-$authority          = "https://login.microsoftonline.com/$graphappdomain"
+$GraphAppDomain = ((Invoke-MgGraphRequest GET "/v1.0/organization" -OutputType PSObject).Value | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.isInitial }).Name
+$authority          = "https://login.microsoftonline.com/$GraphAppDomain"
 $resource           = "https://graph.microsoft.com"
     
-$ccApp = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($ClientID).WithClientSecret($Secret.Value).WithAuthority($Authority).Build()
+$ccApp = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($GraphApp.AppId).WithClientSecret($Secret.SecretText).WithAuthority($Authority).Build()
 
 $Scopes = New-Object System.Collections.Generic.List[string]
 $Scopes.Add("$($Resource)/.default")
 
-$Token = $ccApp.AcquireTokenForClient($Scopes).ExecuteAsync().GetAwaiter().GetResult()
-If ($Token){Write-Verbose "$(Get-Date) Successfully got a token using MSAL for $($Resource)"}
-
-# Set authentication headers
-$GraphAuthHeader = @{'Authorization'="$($Token.TokenType) $($Token.AccessToken)"}
+$MgToken = $ccApp.AcquireTokenForClient($Scopes).ExecuteAsync().GetAwaiter().GetResult()
+If ($MgToken){Write-Verbose "$(Get-Date) Successfully got a token using MSAL for $($Resource)"}
 
 # Get Graph data and continue paging until data collection is complete
 
-Write-Host -ForegroundColor Green "$(Get-Date) Get Graph data and continue paging until data collection is complete"
+Write-Host -ForegroundColor Green "$(Get-Date) Getting users based on inactivity..."
 
-$targetdate = (Get-Date).AddDays(-30).ToString("yyyy-MM-dd")
+$targetdate = (Get-Date).ToUniversalTime().AddDays(-30).ToString("o")
 
 $Result = @()
 if ($SignInType -eq 'Interactive') {
@@ -106,20 +103,20 @@ if ($SignInType -eq 'Interactive') {
 else {
     $siFilter = 'signInActivity/lastNonInteractiveSignInDateTime'
 }
-$ApiUrl = "https://graph.microsoft.com/beta/users?`$filter=$siFilter lt $($targetdate)T00:00:00Z&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
-$Response = Invoke-RestMethod -Headers $GraphAuthHeader -Uri $ApiUrl -Method Get
-$Users = $Response.value
-$Result = $Users
+$ApiUrl = "https://graph.microsoft.com/beta/users?`$filter=$siFilter lt $($targetdate)&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
 
-While ($null -ne $Response.'@odata.nextLink') {
-$Response = Invoke-RestMethod -Headers $GraphAuthHeader -Uri $Response.'@odata.nextLink' -Method Get
-$Users = $Response.value
-$Result += $Users
-}
+Do {
+    $Response = Invoke-MgGraphRequest -Method GET $ApiUrl -Authentication UserProvidedToken -Token ($MgToken.AccessToken | ConvertTo-SecureString -AsPlainText -Force) -OutputType PSObject
+    $ApiUrl = $($Response."@odata.nextLink")
+    If ($ApiUrl) { Write-Verbose "@odata.nextLink: $ApiUrl" }
+    
+    $Result = $Response.Value
+
+} Until ($Null -eq $Response."@odata.nextLink")
 
 # Processing user data to prepare export
 
-Write-Host -ForegroundColor Green "$(Get-Date) Processing user data to prepare export"
+Write-Host -ForegroundColor Green "$(Get-Date) Processing returned users..."
 
 $return=@()
 
@@ -136,19 +133,19 @@ foreach ($item in $result) {
 
 # Exporting CSV
 
-Write-Host -ForegroundColor Green "$(Get-Date) Exporting AAD-InactiveUsers.csv in current directory."  
+Write-Host -ForegroundColor Green "$(Get-Date) Exporting AAD-InactiveUsers.csv in current directory..."  
 
-$return | Select-Object -Property UserPrincipalName,UserType,LastInteractiveSignIn,LastNonInteractiveSignInDateTime | Export-CSV AAD-InactiveUsers.csv -NoTypeInformation
+$return | Select-Object -Property UserPrincipalName,UserType,LastInteractiveSignIn,LastNonInteractiveSignInDateTime | Export-CSV "AAD-InactiveUsers.csv" -NoTypeInformation
 
 # Remove client secret
-Write-Host -ForegroundColor Green "$(Get-Date) Removing client secrets for the SOA application."
-$secrets = Get-AzureADApplicationPasswordCredential -ObjectId $GraphApp.ObjectId
-foreach ($secret in $secrets) {
+Write-Host -ForegroundColor Green "$(Get-Date) Removing any client secrets for the SOA application..."
+$Secrets = (Get-MgApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'").PasswordCredentials
+foreach ($Secret in $Secrets) {
     # Suppress errors in case a secret no longer exists
     try {
-        Remove-AzureADApplicationPasswordCredential -ObjectId $GraphApp.ObjectId -KeyId $secret.KeyId
+        Remove-MgApplicationPassword -ApplicationId $GraphApp.Id -BodyParameter (@{KeyID = $Secret.KeyId})
     }
     catch {}
 }
 
-Stop-Transcript
+# Stop-Transcript
