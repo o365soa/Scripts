@@ -13,12 +13,12 @@
 
 <#
 	.SYNOPSIS
-		Inactive users standalone script
+		Get users via Microsoft Graph based on sign-in activity
 
 	.DESCRIPTION
-        This script is designed to collect a list of users who have not signed in for 30 days or more.
-        The Office 365: Security Optimization Assessment Azure AD application must exist 
-        for this to function.
+        This script will retrieve a list of users who have not signed in for at least 30 days.
+        Note: The "Office 365 Security Optimization Assessment" Azure AD application must exist 
+        for this script to work.
 
     .PARAMETER SignInType
         Filter users on interactive or non-interactive sign-ins. Valid value is Interactive or NonInterctive.
@@ -26,7 +26,7 @@
         
 	.NOTES
         Version 1.3
-        02 June, 2023
+        June 29, 2023
 
 	.LINK
 		about_functions_advanced   
@@ -37,13 +37,13 @@ param (
     [ValidateSet('Interactive','NonInteractive')]$SignInType = 'Interactive'
 )
 
-Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
+# Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
 
 Connect-MgGraph -ContextScope Process -Scopes 'Application.ReadWrite.All','User.Read'
 
 # Get the AzureAD Application and create a secret
 
-Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application."
+Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application..."
 
 $GraphApp = Get-MgApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'" | Where-Object {$_.Web.RedirectUris -Contains "https://security.optimization.assessment.local"}
 
@@ -56,7 +56,7 @@ $Secret = Add-MgApplicationPassword -ApplicationId $GraphApp.Id -PasswordCredent
 
 # Let the secret settle
 
-Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds to let the client secret replicate."
+Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds to allow for client secret replication..."
 Start-sleep 60
 
 # Find a suitable MSAL library - Requires that the ExchangeOnlineManagement module is installed
@@ -76,7 +76,7 @@ Try {Add-Type -LiteralPath $MSAL | Out-Null} Catch {} # Load the MSAL library
 
 # Get a token
 
-Write-Host -ForegroundColor Green "$(Get-Date) Getting an access token"
+# Write-Host -ForegroundColor Green "$(Get-Date) Getting an access token"
 
 $GraphAppDomain = ((Invoke-MgGraphRequest GET "/v1.0/organization" -OutputType PSObject).Value | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.isInitial }).Name
 $authority          = "https://login.microsoftonline.com/$GraphAppDomain"
@@ -92,7 +92,7 @@ If ($MgToken){Write-Verbose "$(Get-Date) Successfully got a token using MSAL for
 
 # Get Graph data and continue paging until data collection is complete
 
-Write-Host -ForegroundColor Green "$(Get-Date) Get Graph data and continue paging until data collection is complete"
+Write-Host -ForegroundColor Green "$(Get-Date) Getting users based on inactivity..."
 
 $targetdate = (Get-Date).ToUniversalTime().AddDays(-30).ToString("o")
 
@@ -116,7 +116,7 @@ Do {
 
 # Processing user data to prepare export
 
-Write-Host -ForegroundColor Green "$(Get-Date) Processing user data to prepare export"
+Write-Host -ForegroundColor Green "$(Get-Date) Processing returned users..."
 
 $return=@()
 
@@ -133,12 +133,12 @@ foreach ($item in $result) {
 
 # Exporting CSV
 
-Write-Host -ForegroundColor Green "$(Get-Date) Exporting AAD-InactiveUsers.csv in current directory."  
+Write-Host -ForegroundColor Green "$(Get-Date) Exporting AAD-InactiveUsers.csv in current directory..."  
 
 $return | Select-Object -Property UserPrincipalName,UserType,LastInteractiveSignIn,LastNonInteractiveSignInDateTime | Export-CSV "AAD-InactiveUsers.csv" -NoTypeInformation
 
 # Remove client secret
-Write-Host -ForegroundColor Green "$(Get-Date) Removing client secrets for the SOA application."
+Write-Host -ForegroundColor Green "$(Get-Date) Removing any client secrets for the SOA application..."
 $Secrets = (Get-MgApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'").PasswordCredentials
 foreach ($Secret in $Secrets) {
     # Suppress errors in case a secret no longer exists
@@ -148,4 +148,4 @@ foreach ($Secret in $Secrets) {
     catch {}
 }
 
-Stop-Transcript
+# Stop-Transcript
