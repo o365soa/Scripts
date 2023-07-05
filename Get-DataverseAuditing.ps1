@@ -16,20 +16,21 @@
         Power Platform Dataverse auditing script
 
     .DESCRIPTION
-        This script is designed to collect a list of Power Platform Dataverse environments
-        which are not configured to audit all event types.
+        Retrieve the environment-level audit settings for all active environments with a Dataverse
+        (excluding Teams-only environments). Can optionally enable environment-level auditing
+        for these environments .
         The 'Office 365: Security Optimization Assessment' Azure AD application must exist 
-        for this to retrieve valid access tokens.
+        for the script to function.
 
     .PARAMETER EnableAuditing
-        Configure the script to also remediate and configure Auditing to be enabled on all Dataverses.
-        Default value is $False.
+        Switch to enable the three environment-level audit settings (Audit enabled, Log access, Log read)
+        for every Dataverse. (As a switch, the default value is $false.)
 
     .PARAMETER AsJson
         Configure the output file type to be JSON instead of CSV
 
     .EXAMPLE
-        PS C:\> .\Get-DataverseAuditing.ps1 -EnableAuditing $True
+        PS C:\> .\Get-DataverseAuditing.ps1 -EnableAuditing
         
     .NOTES
         Version 1.0
@@ -117,7 +118,7 @@ foreach ($instance in $Environments) {
                 RetentionPeriod = $response.value.auditretentionperiodv2
             }
 
-            If ($EnableAuditing) {
+            If ($EnableAuditing -and ($response.value.isauditenabled -ne $true -or $response.value.isuseraccessauditenabled -ne $true -or $response.value.isreadauditenabled -ne $true)) {
                 $Headers = @{
                     'Authorization'="$($token.TokenType) $($token.AccessToken)"
                     'Content-Type' = 'application/json'
