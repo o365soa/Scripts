@@ -32,8 +32,8 @@
 	.PARAMETER Output
 		Path and filename of the report.  Default is O365RoleReport.html in the current directory.
 	.NOTES
-        Version 2.2
-		January 6, 2022
+        Version 2.3
+		August 24, 2023
 		
 		This script uses Bootstrap to format the report. For more information https://www.getbootstrap.com/
 
@@ -50,27 +50,39 @@ Param(
 
 
 function Get-UserDetails ($id) {
-	$user = Get-MsolUser -ObjectId $id
+	try {
+		$user = Get-MsolUser -ObjectId $id -ErrorAction Stop
+		$signInName = $user.SignInName
 	
-	# Determine password age
-    $passwordAge = ((Get-Date) - $user.LastPasswordChangeTimestamp).Days
+		# Determine password age
+		$passwordAge = ((Get-Date) - $user.LastPasswordChangeTimestamp).Days
 
-    # Determine default MFA method
-    $mfaDefault = ($user.StrongAuthenticationMethods | Where-Object {$_.IsDefault -eq $true})
+		# Determine default MFA method
+		$mfaDefault = ($user.StrongAuthenticationMethods | Where-Object {$_.IsDefault -eq $true})
 
-    # MFA Phone Number
-    $mfaPhone = $user.StrongAuthenticationUserDetails.PhoneNumber
+		# MFA Phone Number
+		$mfaPhone = $user.StrongAuthenticationUserDetails.PhoneNumber
 
-	# Determine if cloud user
-    if ($user.ImmutableID -eq $null) {
-    	$type = "Cloud"
-    }
-	else {
-        $type = "Synchronized"
-    }
+		# Determine if cloud user
+		if ($user.ImmutableID -eq $null) {
+			$type = "Cloud"
+		}
+		else {
+			$type = "Synchronized"
+		}
+	}
+	catch {
+		try {
+			$user = Get-MsolServicePrincipal -ObjectId $id -ErrorAction Stop
+			$signInName = $user.DisplayName
+		}
+		catch {
+			$signInName = $id
+		}
+	}
 	
 	return New-Object -TypeName PSObject -Property @{
-        SignInName = $user.SignInName
+        SignInName = $signInName
         PasswordAge = $passwordAge
         MFADefault = $mfaDefault.MethodType
         MFAPhone = $mfaPhone
@@ -250,9 +262,9 @@ if ($SkipWorkload -notcontains 'SCC') {
 		# Iterate each member
 	   	foreach ($sMember in $sgm) {
 			
-	        if ($sMember.RecipientType -eq 'Group') {
+	        if ($sMember.RecipientType -like  '*group') {
 				Write-Verbose -Message "Group assigned $($sccRole.Name) role: $($sMember.DisplayName)"
-				$mgm = Get-MsolGroupMember -GroupObjectId $sMember.ExternalDirectoryObjectId
+				$mgm = Get-MsolGroupMember -GroupObjectId $sMember.Guid.Guid
 				foreach ($mMember in $mgm) {
 					Write-Verbose -Message "User in $($sMember.DisplayName) group assigned $($sccRole.Name) role: $($mMember.DisplayName) ($($mMember.EmailAddress))"
 					$roleUsers += New-Object -TypeName PSObject -Property @{
@@ -270,7 +282,7 @@ if ($SkipWorkload -notcontains 'SCC') {
 				}
 				Write-Verbose -Message "User assigned $($sccRole.Name) role: $($sMember.Name) ($memberID)"
 				$roleUsers += New-Object -TypeName PSObject -Property @{
-					Id = $sMember.ExternalDirectoryObjectId
+					Id = $sMember.Guid.Guid
 					ParentGroup = ""
 				}
 			}
