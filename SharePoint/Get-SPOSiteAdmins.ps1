@@ -39,15 +39,14 @@
         When using ExpandGroups, changes endpoints to use for Microsoft Graph for tenants in sovereign clouds for group expansion. 
         The accepted values are Commercial [Default],USGovGCC, USGovGCCHigh, USGovDoD, Germany, China.
     .Parameter ExpandGroups
-        Get the membership of a group (including recursion) assigned site admin. The Azure AD Preview module and the SOA Azure AD
+        Get the membership of a group (including recursion) assigned site admin. The Azure AD Preview and Microsoft.Graph.Authentication modules and the SOA Entra ID
         application are required.
 	.Notes
-		Version: 2.3
-		Date: April 28, 2023
+		Version: 2.4
+		Date: January 30, 2024
 #>
-
+[CmdletBinding()]
 Param(
-    [CmdletBinding()]
     [Parameter(Mandatory=$false)][string]$OutputDir = (Get-Location).Path,
     [Parameter(Mandatory=$true)][string]$SPOAdmin,
     [string]$SPOTenantName,
@@ -143,34 +142,6 @@ function Revoke-SiteAdmin
     Write-Verbose "$(Get-Date) Revoke-SiteAdmin: Finished"
 }
 
-function Get-GraphToken {
-    Param(
-        $ClientID,
-        $ClientSecret,
-        $TenantDomain,
-        $Resource="https://graph.microsoft.com"
-    )
-
-    switch ($O365EnvironmentName) {
-        "Commercial"   {$Resource = "https://graph.microsoft.com";break}
-        "USGovGCC"     {$Resource = "https://graph.microsoft.com";break}
-        "USGovGCCHigh" {$Resource = "https://graph.microsoft.us";break}
-        "USGovDoD"     {$Resource = "https://dod-graph.microsoft.us";break}
-        "Germany"      {$Resource = "https://graph.microsoft.com";break}
-        "China"        {$Resource = "https://microsoftgraph.chinacloudapi.cn"}
-    }
-
-    # Get an Oauth 2 access token based on client id, secret and tenant domain
-    # Get-MSALAccessToken is in SOA module
-    $Result = Get-MSALAccessToken -TenantName $TenantDomain -ClientID $ClientID -Secret $ClientSecret -Resource $Resource -O365EnvironmentName $O365EnvironmentName
-
-    if ($null -ne $Result.AccessToken) {
-        Return $Result
-    } Else {
-        Write-Error "Failed to get token."
-        Return $False
-    }
-}
 function Get-MgGraphData {
     <#
 
@@ -180,9 +151,6 @@ function Get-MgGraphData {
     Param (
         [Switch]$Beta,
         [String]$Endpoint,
-        $ClientID,
-        $ClientSecret,
-        $TenantDomain,
         [string]$Query
     )
 
@@ -204,23 +172,13 @@ function Get-MgGraphData {
 
     $ApiUrl = $Uri+$Query
 
-    # Get a new access token with every request to avoid expiration, until v2 of the Graph SDK modules release which support client secret credentials using Connect-MgGraph
-    $Token = Get-GraphToken -ClientID $ClientID -ClientSecret $ClientSecret -TenantDomain $TenantDomain
-
-
-    # Skip call if access token was not obtained
-    if ($null -ne $Token) {
-        Try {
-            $MgToken = $Token.AccessToken | ConvertTo-SecureString -AsPlainText -Force
-            Write-Verbose "Running Invoke-MgGraphRequest to $ApiUrl"
-            $result = Invoke-MgGraphRequest -Method GET $ApiUrl -Authentication UserProvidedToken -Token $MgToken
-        } Catch {
-            Write-Warning "Unable to run Invoke-MgGraphRequest to $ApiUrl"
-            Write-Verbose $error[0]
-        }
-    }
-    else {
-        Write-Warning -Message "$(Get-Date) Skipping this Graph API call because an access token was not obtained."
+    try {
+        Write-Verbose "Running Invoke-MgGraphRequest to $ApiUrl"
+        $result = Invoke-MgGraphRequest -Method GET $ApiUrl
+    } 
+    catch {
+        Write-Warning "Unable to run Invoke-MgGraphRequest to $ApiUrl"
+        Write-Verbose $error[0]
     }
 
     return ($result | ConvertTo-Json -Depth 10)
@@ -231,7 +189,7 @@ function Get-AadRoleMembers {
     )
     
     $members = @()
-    $roleMembers = (Get-MgGraphData -Endpoint "directoryRoles" -Query "/$Id/members" -ClientID $AzureADApp.AppId -ClientSecret $AzureADAppCred -TenantDomain $AppDomain | ConvertFrom-Json).Value
+    $roleMembers = (Get-MgGraphData -Endpoint "directoryRoles" -Query "/$Id/members" | ConvertFrom-Json).Value
 
     foreach ($rm in $roleMembers) {
         # Member can be a user/SP or group
@@ -259,7 +217,7 @@ function Get-GroupMembers {
     # Perform one-time lookup of AAD roles to get the object ID of each
     if (-not($script:aadRoleIds)) {
         Write-Verbose "$(Get-Date) Getting Azure AD roles"
-        $aadRoles = (Get-MgGraphData -Beta -Endpoint directoryRoles -ClientID $AzureADApp.AppId -ClientSecret $AzureADAppCred -TenantDomain $AppDomain | ConvertFrom-Json).value
+        $aadRoles = (Get-MgGraphData -Beta -Endpoint directoryRoles | ConvertFrom-Json).value
         if ($aadRoles) {
             $script:aadRoleIds = $aadRoles.Id
             Write-Verbose "$(Get-Date) $($script:aadRoleIds.Count) role IDs added to collection of roles."
@@ -287,10 +245,10 @@ function Get-GroupMembers {
             # If M365 Group, drop _o from end of GUID for site owner group and get only the owners
             if ($id.Length -eq 38) {
                 $lookupId = $id.Substring(0,36)
-                $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$lookupId/owners?`$top=999" -ClientID $AzureADApp.AppId -ClientSecret $AzureADAppCred -TenantDomain $AppDomain | ConvertFrom-Json).value
+                $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$lookupId/owners?`$top=999" | ConvertFrom-Json).value
             }
             else {
-                $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$Id/transitiveMembers?`$top=999" -ClientID $AzureADApp.AppId -ClientSecret $AzureADAppCred -TenantDomain $AppDomain | ConvertFrom-Json).value
+                $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$Id/transitiveMembers?`$top=999" | ConvertFrom-Json).value
             }
             $memberIds = @()
             foreach ($member in ($groupMembers | Where-Object {$_."@odata.type" -ne '#microsoft.graph.group'})) {
@@ -310,8 +268,11 @@ function Get-GroupMembers {
 
 function Get-SPOAdminsList
 {
-    if (-not(Get-SpoTenant -ErrorAction SilentlyContinue)) {
-    	if (-not($SPOTenantName)){
+    try {
+        Get-SpoTenant -ErrorAction Stop | Out-Null
+    }
+    catch {
+        if (-not($SPOTenantName)) {
 			$SPOTenantName = Read-Host -Prompt "Please enter the tenant name (without the .onmicrosoft.com suffix)"
 		}
 		$siteUrl = "https://$SPOTenantName-admin.sharepoint.com"
@@ -480,24 +441,50 @@ if ($ExpandGroups) {
         throw "The AzureADPreview module is required when ExpandGroups is True."
     }
 
+    if ((Get-Module -Name Microsoft.Graph.Authentication -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1).Version.Major -ge 2) {
+        if (-not(Get-Module -Name Microsoft.Graph.Authentication).Version.Major -ge 2) {
+            Remove-Module Microsoft.Graph.Authentication
+            Import-Module -Name Microsoft.Graph.Authentication -MinimumVersion 2.0.0
+        }
+    }
+    else {
+        throw "The Microsoft.Graph.Authentication module version 2.0.0 or higher is required when ExpandGroups is True."
+    }
+
     $AppDomain = (Get-AzureADTenantDetail | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.Initial }).Name
 
     $AzureADApp = Get-AzureADApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'"
     if ($AzureADApp) {
-        Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application."
+        Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application..."
         try {
             # Reset-SOAAppSecret is in SOA module
             $AzureADAppCred = Reset-SOAAppSecret -App $AzureADApp -Task "Get Site Admins"
+            Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds for replication of the client secret..."
+            Start-sleep 60
         }
         catch {
             throw "Unable to create client secret. Verify the signed in user has permission to manage the application."
         }
-        Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds for replication of the client secret."
-        Start-sleep 60
-    
+        $SSCred = $AzureADAppCred | ConvertTo-SecureString -AsPlainText -Force
+        $GraphCred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList ($AzureADApp.AppId), $SSCred
+        switch ($O365EnvironmentName) {
+            "Commercial"   {$cloud = 'Global'}
+            "USGovGCC"     {$cloud = 'Global'}
+            "USGovGCCHigh" {$cloud = 'USGov'}
+            "USGovDoD"     {$cloud = 'USGovDoD'}
+            "Germany"      {$cloud = 'Germany'}
+            "China"        {$cloud = 'China'}
+        }
+        Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Graph as the SOA application..."
+        try {
+            Connect-MgGraph -TenantId $AppDomain -ClientSecretCredential $GraphCred -Environment $cloud -ContextScope Process -ErrorAction Stop | Out-Null
+        }
+        catch {
+            throw $_
+        }
     }
     else {
-        throw "The SOA Azure AD application does not exist and is required when ExpandGroups is True. Run `"Install-SOAPrerequisites -AzureADAppOnly`"."
+        throw "The SOA Entra ID application does not exist and is required when ExpandGroups is True. Run `"Install-SOAPrerequisites -AzureADAppOnly`"."
     }
 }
 else {
