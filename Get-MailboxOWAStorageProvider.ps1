@@ -59,7 +59,7 @@ begin {
 		break
 	}
 
-	# Check for EWS API installed via Nuget
+	# Check for EWS API installed via NuGet
 	# If already loaded, save time by reusing the loaded type
 	if (-not('Microsoft.Exchange.WebServices.Data.ExchangeVersion' -as [type])) {
 		Write-Verbose 'EWS Managed API is not loaded. Checking if package is installed...'
@@ -67,7 +67,7 @@ begin {
 		if ($apiPackage) {
 			$dllName = 'microsoft.exchange.webservices.dll'
 			try {
-				Write-Verbose "Loading EWS Managed API from ($(Get-Item $apiPackage.Source).DirectoryName)..."
+				Write-Verbose "Loading EWS Managed API from $((Get-Item $apiPackage.Source).DirectoryName)"
 				Add-Type -Path (Join-Path -Path (Get-ChildItem -Path (Get-Item $apiPackage.Source).DirectoryName -Recurse -Filter $dllName | 
 				Select-Object -ExpandProperty DirectoryName) -ChildPath $dllName) -ErrorAction Stop | Out-Null
 			}
@@ -77,7 +77,7 @@ begin {
 			}
 		}
 		else {
-			Write-Error 'The Exchange Web Services Managed API is not installed from Nuget and is required by this script.' -Category NotInstalled
+			Write-Error 'The Exchange Web Services Managed API is not installed from NuGet and is required by this script.' -Category NotInstalled
 			break
 		}
 	}
@@ -91,7 +91,7 @@ begin {
 		if ($PSEdition -eq 'Core') {$folder = 'netCore'} else {	$folder = 'NetFramework'}
 		$ExoModule = Get-Module -Name ExchangeOnlineManagement -ListAvailable | Sort-Object -Property Version -Descending | Select-Object -First 1
 		$MSAL = Join-Path -Path $ExoModule.ModuleBase -ChildPath "$($folder)\Microsoft.Identity.Client.dll"
-		Add-Type -LiteralPath $MSAL | Out-Null
+		Add-Type -Path $MSAL | Out-Null
 	}
 	else {
 		Write-Verbose 'Using the MSAL that is already loaded.'
