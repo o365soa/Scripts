@@ -18,11 +18,13 @@
 		Get the list of site admins for every site.
 	.Description
 		Saves to CSV the site admins for every site, differentiating between users and groups.
-        Group membership will be expanded if that option is used.
+        Group membership will be expanded if not opted out.
+        Group expansion requires the Microsoft.Graph.Authentication module and the least-privileged 
+            overlapping scope for getting directory roles and group membership: Directory.Read.All
 	.Parameter OutputDir
 		Directory to save the output file.  Default is the current directory.
 	.Parameter SPOAdmin
-		UPN of the admin account that has, or will be granted, site admin permission (unless
+		UPN of the admin account that has, or will be temporarily granted, site admin permission (unless
         SPOPermissionOptOut is True).
 	.Parameter SPOTenantName
 		Name of the tenant, which is the subdomain value of the .onmicrosoft.com domain, e.g.,
@@ -35,15 +37,14 @@
 		the permission is removed after the site is checked.
     .Parameter IncludeOneDriveSites
         Include OneDrive for Business sites.
-    .Parameter O365EnvironmentName
-        When using ExpandGroups, changes endpoints to use for Microsoft Graph for tenants in sovereign clouds for group expansion. 
+    .Parameter Environment
+        When expanding groups, sets endpoints to use for Microsoft Graph for tenants in sovereign clouds. 
         The accepted values are Commercial [Default],USGovGCC, USGovGCCHigh, USGovDoD, Germany, China.
-    .Parameter ExpandGroups
-        Get the membership of a group (including recursion) assigned site admin. The Azure AD Preview and Microsoft.Graph.Authentication modules and the SOA Entra ID
-        application are required.
+    .Parameter DoNotExpandGroups
+        Do not get the recursive membership of groups assigned site admin.
 	.Notes
 		Version: 2.4
-		Date: January 30, 2024
+		Date: May 23, 2024
 #>
 [CmdletBinding()]
 Param(
@@ -52,8 +53,8 @@ Param(
     [string]$SPOTenantName,
     [switch]$SPOPermissionOptOut,
     [switch]$IncludeOneDriveSites,
-    [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "Germany", "China")][string]$O365EnvironmentName="Commercial",
-    [switch]$ExpandGroups
+    [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "Germany", "China")][string]$Environment="Commercial",
+    [switch]$DoNotExpandGroups
 )
 
 if (-not([System.Management.Automation.PSTypeName]'SiteCollectionAdminState').Type){
@@ -69,7 +70,7 @@ if (-not([System.Management.Automation.PSTypeName]'SiteCollectionAdminState').Ty
 
 function Grant-SiteAdmin
 {
-    Param(
+    param(
         [Parameter(Mandatory=$True)]
         [Microsoft.Online.SharePoint.PowerShell.SPOSite]$Site
     )
@@ -78,19 +79,16 @@ function Grant-SiteAdmin
 
     # Skip this site collection if the current user does not have permissions and
     # permission changes should not be made ($SPOPermissionOptOut)
-    #if ($needsAdmin -and $SPOPermissionOptOut)
     if ($SPOPermissionOptOut) {
         Write-Verbose "$(Get-Date) Grant-SiteAdmin: Skipping $($Site.URL) PermissionOptOut $SPOPermissionOptOut"
         [SiteCollectionAdminState]$adminState = [SiteCollectionAdminState]::Skip
-    }
-    # Grant access to the site collection, if required
-    else {
-        try{
+    } else {
+        # Grant access to the site collection, if required
+        try {
             Write-Verbose "$(Get-Date) Grant-SiteAdmin: Adding $SPOAdmin to $($Site.URL)"
             Set-SPOUser -site $Site -LoginName $SPOAdmin -IsSiteCollectionAdmin $True -ErrorAction Stop | Out-Null
             [SiteCollectionAdminState]$adminState = [SiteCollectionAdminState]::Needed
-        }
-        catch{
+        } catch {
             Write-Verbose "$(Get-Date) Failed to add site admin to site  $($Site.URL)"
         }
     }
@@ -102,7 +100,7 @@ function Grant-SiteAdmin
 
 function Revoke-SiteAdmin
 {
-    Param(
+    param(
         [Parameter(Mandatory=$True)]
         [Microsoft.Online.SharePoint.PowerShell.SPOSite]$Site,
         [Parameter(Mandatory=$True)]
@@ -110,9 +108,8 @@ function Revoke-SiteAdmin
     )
 
     # Cleanup permission changes, if any
-    if ($AdminState -eq [SiteCollectionAdminState]::Needed)
-    {
-        Trap [System.Net.WebException] {
+    if ($AdminState -eq [SiteCollectionAdminState]::Needed) {
+        trap [System.Net.WebException] {
             Write-Verbose "$(Get-Date) $($error[0].Exception.Message)" -Verbose
             Write-Verbose "$(Get-Date) A terminating error was caught by a Trap statement"
 
@@ -122,74 +119,74 @@ function Revoke-SiteAdmin
             Start-Sleep -Seconds $seconds
             continue 
         }
-        Try {
+        try {
             Write-Verbose "$(Get-Date) Revoke-SiteAdmin: $($site.url) Revoking $SPOAdminUPN"
             Set-SPOUser -site $Site -LoginName $SPOAdmin -IsSiteCollectionAdmin $False | Out-Null
-        } Catch [System.Net.WebException] {
+        } catch [System.Net.WebException] {
             Write-Verbose "$(Get-Date) $($error[0].Exception.Message)" -Verbose
             Write-Verbose "$(Get-Date) A non-terminating error was caught by a Catch statement"
 
             # Add throttling to next attempt. Try to read the value in the Retry-After header, otherwise we just sleep a static amount
-            Try { $seconds = 0 ; $seconds = $Error[0].Exception.Response.Headers["Retry-After"] } Catch { $seconds = 5 }
+            try {
+                $seconds = 0 ; $seconds = $Error[0].Exception.Response.Headers["Retry-After"]
+            } catch {
+                $seconds = 5
+            }
             Write-Host "$(Get-Date) Requests are being throttled. Sleeping for $seconds seconds" -ForegroundColor Yellow
             Start-Sleep -Seconds $seconds
-        } Catch {
+        } catch {
             Write-Verbose "$(Get-Date) $($error[0].Exception.Message)" -Verbose
         }
-
     }
     
     Write-Verbose "$(Get-Date) Revoke-SiteAdmin: Finished"
 }
 
 function Get-MgGraphData {
-    <#
-
-        Preferred to use this function for querying data from the Graph API as it leverages the native Invoke-MgGraphRequest cmdlet
-    
-    #>
     Param (
         [Switch]$Beta,
         [String]$Endpoint,
         [string]$Query
     )
 
-    switch ($O365EnvironmentName) {
-        "Commercial"   {$Base = "https://graph.microsoft.com";break}
-        "USGovGCC"     {$Base = "https://graph.microsoft.com";break}
-        "USGovGCCHigh" {$Base = "https://graph.microsoft.us";break}
-        "USGovDoD"     {$Base = "https://dod-graph.microsoft.us";break}
-        "Germany"      {$Base = "https://graph.microsoft.com";break}
-        "China"        {$Base = "https://microsoftgraph.chinacloudapi.cn";break}
-    }
-
-    # Request endpoints found at http://aka.ms/GraphApiRef
-    If($Beta) {
-        $Uri = "$Base/beta/$Endpoint"
-    } Else {
-        $Uri = "$Base/v1.0/$Endpoint"
+    if ($Beta) {
+        $Uri = "/beta/$Endpoint"
+    } else {
+        $Uri = "/v1.0/$Endpoint"
     }
 
     $ApiUrl = $Uri+$Query
-
+    $result = @()
     try {
         Write-Verbose "Running Invoke-MgGraphRequest to $ApiUrl"
-        $result = Invoke-MgGraphRequest -Method GET $ApiUrl
+        do {
+            # Get data via Graph and continue paging until complete
+            $response = Invoke-MgGraphRequest -Method GET $apiUrl -OutputType PSObject
+            $apiUrl = $($response."@odata.nextLink")
+            if ($apiUrl) { Write-Verbose "@odata.nextLink: $apiUrl" }
+            if ($response.Value) {
+                $result += $response.Value
+            } else {
+                $result += $response
+            }
+        }
+        until ($null -eq $response."@odata.nextLink")
     } 
     catch {
         Write-Warning "Unable to run Invoke-MgGraphRequest to $ApiUrl"
         Write-Verbose $error[0]
     }
 
-    return ($result | ConvertTo-Json -Depth 10)
+    return $result
 }
+
 function Get-AadRoleMembers {
     param (
         $RoleId
     )
     
     $members = @()
-    $roleMembers = (Get-MgGraphData -Endpoint "directoryRoles" -Query "/$Id/members" | ConvertFrom-Json).Value
+    $roleMembers = Get-MgGraphData -Endpoint "directoryRoles" -Query "/$Id/members"
 
     foreach ($rm in $roleMembers) {
         # Member can be a user/SP or group
@@ -214,10 +211,10 @@ function Get-GroupMembers {
         $DisplayName
     )
 
-    # Perform one-time lookup of AAD roles to get the object ID of each
+    # Perform one-time lookup of Entra roles to get the object ID of each
     if (-not($script:aadRoleIds)) {
-        Write-Verbose "$(Get-Date) Getting Azure AD roles"
-        $aadRoles = (Get-MgGraphData -Beta -Endpoint directoryRoles | ConvertFrom-Json).value
+        Write-Verbose "$(Get-Date) Getting Microsoft Entra roles"
+        $aadRoles = Get-MgGraphData -Beta -Endpoint directoryRoles
         if ($aadRoles) {
             $script:aadRoleIds = $aadRoles.Id
             Write-Verbose "$(Get-Date) $($script:aadRoleIds.Count) role IDs added to collection of roles."
@@ -234,7 +231,7 @@ function Get-GroupMembers {
     }
     else {
         if ($script:aadRoleIds -contains $Id) {
-                # Group is an AAD role
+                # Group is an Entra role
                 $groupMembers = Get-AadRoleMembers -RoleId $Id
                 [array]$memberIds = $groupMembers
                 Write-Verbose -Message "$(Get-Date) $DisplayName contains $($memberIds.Count) transitive members."
@@ -245,10 +242,10 @@ function Get-GroupMembers {
             # If M365 Group, drop _o from end of GUID for site owner group and get only the owners
             if ($id.Length -eq 38) {
                 $lookupId = $id.Substring(0,36)
-                $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$lookupId/owners?`$top=999" | ConvertFrom-Json).value
+                $groupMembers = Get-MgGraphData -Beta -Endpoint groups -Query "/$lookupId/owners?`$top=999"
             }
             else {
-                $groupMembers = (Get-MgGraphData -Beta -Endpoint groups -Query "/$Id/transitiveMembers?`$top=999" | ConvertFrom-Json).value
+                $groupMembers = Get-MgGraphData -Beta -Endpoint groups -Query "/$Id/transitiveMembers?`$top=999"
             }
             $memberIds = @()
             foreach ($member in ($groupMembers | Where-Object {$_."@odata.type" -ne '#microsoft.graph.group'})) {
@@ -270,10 +267,9 @@ function Get-SPOAdminsList
 {
     try {
         Get-SpoTenant -ErrorAction Stop | Out-Null
-    }
-    catch {
+    } catch {
         if (-not($SPOTenantName)) {
-			$SPOTenantName = Read-Host -Prompt "Please enter the tenant name (without the .onmicrosoft.com suffix)"
+			$SPOTenantName = Read-Host -Prompt "Enter the tenant name (without the .onmicrosoft.com (or .us) suffix)"
 		}
 		$siteUrl = "https://$SPOTenantName-admin.sharepoint.com"
 		Write-Verbose "$(Get-Date) Connect to SPO tenant admin URL: $($siteUrl)"
@@ -313,17 +309,17 @@ function Get-SPOAdminsList
             
         [SiteCollectionAdminState]$adminState = [SiteCollectionAdminState]::NotNeeded
         # Check if SiteAdmins count can be determined, if not, suppress errors. Trap statement also needed to sometimes catch Terminating errors
-        Trap [System.Net.WebException] {
+        trap [System.Net.WebException] {
             Write-Verbose "$(Get-Date) $($error[0].Exception.Message)" -Verbose
             Write-Verbose "$(Get-Date) A terminating error was caught by a Trap statement"
 
             # Add throttling to next attempt. Try to read the value in the Retry-After header, otherwise we just sleep a static amount
-            Try { $retry = $Error[0].Exception.Response.Headers["Retry-After"] } Catch {}
+            try { $retry = $Error[0].Exception.Response.Headers["Retry-After"] } Catch {}
             if ($retry) { 
                 $seconds = [math]::Ceiling($retry) 
             }
 
-            If (-Not $Seconds) { $seconds = 15 }
+            if (-Not $Seconds) { $seconds = 15 }
             Write-Host "$(Get-Date) Requests are being throttled. Sleeping for $seconds seconds" -ForegroundColor Yellow
             Start-Sleep -Seconds $seconds
             
@@ -333,8 +329,7 @@ function Get-SPOAdminsList
             Write-Verbose "$(Get-Date) Get-SPOSiteProperties: Processing $($site.Url)"
             # Try and get the list of site users
             $siteUsers = Get-SPOUser -Site $site -Limit ALL -ErrorAction Stop
-        }
-        catch [Microsoft.SharePoint.Client.ServerUnauthorizedAccessException] { 
+        } catch [Microsoft.SharePoint.Client.ServerUnauthorizedAccessException] { 
             Write-Verbose "$(Get-Date) Access is denied to site $($Site.Url)"
             # Grant permission to the site, if needed and allowed
             [SiteCollectionAdminState]$adminState = Grant-SiteAdmin -Site $site
@@ -344,38 +339,34 @@ function Get-SPOAdminsList
                 #Try to get site users again
                 try {
                     $siteUsers = Get-SPOUser -Site $site -Limit ALL -ErrorAction Stop
-                }
-                catch {}
+                } catch {}
             }
-        }
-        catch { 
+        } catch { 
             Write-Verbose "$(Get-Date) $($error[0].Exception.Message)" -Verbose
             Write-Verbose "$(Get-Date) A non-terminating error was caught by a Catch statement"
 
             # Add throttling to next attempt. Try to read the value in the Retry-After header, otherwise we just sleep a static amount
-            Try { $retry = $Error[0].Exception.Response.Headers["Retry-After"] } Catch {}
+            try { $retry = $Error[0].Exception.Response.Headers["Retry-After"] } Catch {}
             if ($retry) { 
                 $seconds = [math]::Ceiling($retry) 
             }
             
-            If (-Not $Seconds) { $seconds = 15 }
+            if (-not $Seconds) { $seconds = 15 }
             Write-Host "$(Get-Date) Requests are being throttled. Sleeping for $seconds seconds" -ForegroundColor Yellow
             Start-Sleep -Seconds $seconds
-        }
-        finally {
+        } finally {
             $siteAdminEntries = $siteUsers | Where-Object { $_.IsSiteAdmin -eq $true}
             $siteAdminUsers = @()
             $siteAdminGroups = @()
             if ($siteAdminEntries) {
-                if ($ExpandGroups) {
+                if ($DoNotExpandGroups -eq $false) {
                     # Loop through site admins, expanding groups
                     foreach ($entry in $siteAdminEntries) {
                         if ($entry.IsGroup -eq $true) {
                             Write-Verbose -Message "$(Get-Date) Site admin entry `"$($entry.DisplayName)`" is a group. Expanding members."
                             [array]$groupMembers = Get-GroupMembers -Id $entry.LoginName -DisplayName $entry.DisplayName 
                             $siteAdminGroups += $entry.DisplayName + ' (' + $($groupMembers -join ' ') + ')'
-                        }
-                        else {
+                        } else {
                             $siteAdminUsers += $entry.LoginName
                         }
                     }
@@ -383,16 +374,14 @@ function Get-SPOAdminsList
                     if ($AdminState -eq [SiteCollectionAdminState]::Needed) {
                         [array]$siteAdminUsers = $siteAdminUsers | Where-Object {$_ -ne $SpoAdmin}
                     }
-                }
-                else {
+                } else {
                     for ($i=0; $i -lt $siteAdminEntries.Count; $i++) {
                         # Skip admin if listed only because of "admin needed"
                         if (-not($siteAdminEntries[$i].LoginName -eq $SpoAdmin -and $adminState -eq [SiteCollectionAdminState]::Needed)) {
                             # Include entry type
                             if ($siteAdminEntries[$i].IsGroup) {
                                 $siteAdminGroups += $siteAdminEntries[$i].DisplayName
-                            }
-                            else {
+                            } else {
                                 $siteAdminUsers += $siteAdminEntries[$i].LoginName
                             }
                         }
@@ -402,12 +391,10 @@ function Get-SPOAdminsList
                 if ($AdminState -eq [SiteCollectionAdminState]::Needed) {
                    Revoke-SiteAdmin -Site $site -AdminState $adminState
                 }
-            }
-            elseif ($siteUsers) {
+            } elseif ($siteUsers) {
                 # Collection of users returned, but none are listed as a site admin
                 $siteAdminUsers = "[No site admins]"
-            }
-            else {
+            } else {
                 # No collection returned due to no permission to site
                 $siteAdminUsers = "[Access denied to site]"
             }
@@ -426,78 +413,39 @@ function Get-SPOAdminsList
 
 }
 
-if ($ExpandGroups) {
-    if (-not(Get-Module -Name SOA -ListAvailable)){
-        throw "The SOA module is required when ExpandGroups is True. Run `"Install-Module SOA`" first."
+if ($DoNotExpandGroups -eq $false) {
+    if (-not((Get-Module -Name Microsoft.Graph.Authentication -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1).Version.Major -ge 2)){
+        throw "The Microsoft.Graph.Authentication module v2 is required when group expansion is included. (Use -DoNotExpandGroups to opt out.)"
     }
-    
-    # Connect to Azure AD. This is required to create the client secret used by the SOA application.    
-    if (Get-Module -Name AzureADPreview -ListAvailable) {
-        Import-Module AzureADPreview
-        Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Azure AD. Use an administrator account with owner permission to the SOA application."
-        Connect-AzureAD -AccountId $SPOAdmin | Out-Null
+    if ((Get-Module -Name Microsoft.Graph.Authentication).Version.Major -lt 2) {
+        Remove-Module Microsoft.Graph.Authentication
     }
-    else {
-        throw "The AzureADPreview module is required when ExpandGroups is True."
-    }
+    Import-Module -Name Microsoft.Graph.Authentication -MinimumVersion 2.0.0
 
-    if ((Get-Module -Name Microsoft.Graph.Authentication -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1).Version.Major -ge 2) {
-        if (-not(Get-Module -Name Microsoft.Graph.Authentication).Version.Major -ge 2) {
-            Remove-Module Microsoft.Graph.Authentication
-            Import-Module -Name Microsoft.Graph.Authentication -MinimumVersion 2.0.0
-        }
+    switch ($Environment) {
+        "Commercial"   {$cloud = 'Global'}
+        "USGovGCC"     {$cloud = 'Global'}
+        "USGovGCCHigh" {$cloud = 'USGov'}
+        "USGovDoD"     {$cloud = 'USGovDoD'}
+        "Germany"      {$cloud = 'Germany'}
+        "China"        {$cloud = 'China'}
     }
-    else {
-        throw "The Microsoft.Graph.Authentication module version 2.0.0 or higher is required when ExpandGroups is True."
-    }
-
-    $AppDomain = (Get-AzureADTenantDetail | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.Initial }).Name
-
-    $AzureADApp = Get-AzureADApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'"
-    if ($AzureADApp) {
-        Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application..."
+    Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Microsoft Graph with delegated authentication..."
+    if ((Get-MgContext).Scopes -notcontains 'Directory.Read.All') {
         try {
-            # Reset-SOAAppSecret is in SOA module
-            $AzureADAppCred = Reset-SOAAppSecret -App $AzureADApp -Task "Get Site Admins"
-            Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds for replication of the client secret..."
-            Start-sleep 60
-        }
-        catch {
-            throw "Unable to create client secret. Verify the signed in user has permission to manage the application."
-        }
-        $SSCred = $AzureADAppCred | ConvertTo-SecureString -AsPlainText -Force
-        $GraphCred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList ($AzureADApp.AppId), $SSCred
-        switch ($O365EnvironmentName) {
-            "Commercial"   {$cloud = 'Global'}
-            "USGovGCC"     {$cloud = 'Global'}
-            "USGovGCCHigh" {$cloud = 'USGov'}
-            "USGovDoD"     {$cloud = 'USGovDoD'}
-            "Germany"      {$cloud = 'Germany'}
-            "China"        {$cloud = 'China'}
-        }
-        Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Graph as the SOA application..."
-        try {
-            Connect-MgGraph -TenantId $AppDomain -ClientSecretCredential $GraphCred -Environment $cloud -ContextScope Process -ErrorAction Stop | Out-Null
+            Connect-MgGraph -Scopes 'Directory.Read.All' -Environment $cloud -ContextScope CurrentUser -ErrorAction Stop | Out-Null
         }
         catch {
             throw $_
         }
-    }
-    else {
-        throw "The SOA Entra ID application does not exist and is required when ExpandGroups is True. Run `"Install-SOAPrerequisites -AzureADAppOnly`"."
     }
 }
 else {
     $tag = "(without expanding groups)"
 }
 
-#region Collect - SPO Site Admins
 Write-Host "$(Get-Date) Getting SPO site admins $tag" -ForegroundColor Green
 
 Get-SPOAdminsList 
 #endregion
 
-if ($AzureADAppCred) {
-    # Remove-SOAAppSecret is in SOA module
-    Remove-SOAAppSecret -app $AzureADApp
-}
