@@ -1,5 +1,5 @@
 # Scripts
-This is a collection of scripts we share as part of Office 365 Security Optimization Assessment, a Microsoft Premier Support engagement.
+This is a collection of scripts shared as part of the SOA for Microsoft Defender and Microft 365 Foundations - Workload Security Assessment, which are Microsoft Services proactive offerings.
 
 Check the documentation for more information about each script.
 
