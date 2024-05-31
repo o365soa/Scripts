@@ -16,136 +16,114 @@
 		Get users via Microsoft Graph based on sign-in activity
 
 	.DESCRIPTION
-        This script will retrieve a list of users who have not signed in for at least 30 days.
-        Note: The "Office 365 Security Optimization Assessment" Azure AD application must exist 
-        for this script to work.
+        This script will retrieve a list of users who have not signed in for at least a specified number of days.
+        Requires Microsoft.Graph.Authentication module and delegated scope of User.Read.All.
 
     .PARAMETER SignInType
-        Filter users on interactive or non-interactive sign-ins. Valid value is Interactive or NonInterctive.
-        Interactive is the default.
+        Filter users on the type of sign-in: interactive (successful or unsuccessful), non-interactive (successful or unsuccessful),
+        or successful (for either type). Valid values are Interactive, NonInteractive, and Successful.
+        Successful is the default.
+
+    .PARAMETER DaysOfInactivity
+        The number of days of sign-in inactivity for the user to be returned. Default value is 30.
+        Note: Users with a null value for the date/time of the sign-in type will not be returned.
+    
+    .PARAMETER Environment
+        Cloud environment of the tenant. Possible values are Commercial, USGovGCC, USGovGCCHigh, USGovDoD, Germany, and China.
+        Default value is Commercial.
+
+    .PARAMETER DoNotExportToCSV
+        Switch to skip exporting the results to CSV and instead output the result objects to the host.
         
 	.NOTES
-        Version 1.3
-        June 29, 2023
+        Version 1.4
+        May 23, 2024
 
 	.LINK
 		about_functions_advanced   
 #>
-#Requires -Modules ExchangeOnlineManagement, Microsoft.Graph.Authentication, Microsoft.Graph.Applications
+#Requires -Modules @{ModuleName = 'Microsoft.Graph.Authentication'; ModuleVersion = '2.0.0'}
 [CmdletBinding()]
 param (
-    [ValidateSet('Interactive','NonInteractive')]$SignInType = 'Interactive'
+    [ValidateSet('Interactive','NonInteractive','Successful')]$SignInType = 'Successful',
+    [int]$DaysOfInactivity = 30,
+    [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "Germany", "China")][string]$Environment="Commercial",
+    [switch]$DoNotExportToCSV
 )
 
 # Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
-
-Connect-MgGraph -ContextScope Process -Scopes 'Application.ReadWrite.All','User.Read'
-
-# Get the AzureAD Application and create a secret
-
-Write-Host -ForegroundColor Green "$(Get-Date) Creating a new client secret for the SOA application..."
-
-$GraphApp = Get-MgApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'" | Where-Object {$_.Web.RedirectUris -Contains "https://security.optimization.assessment.local"}
-
-$Params = @{
-    displayName = "Task on $(Get-Date -Format "dd-MMM-yyyy")"
-    endDateTime = (Get-Date).AddDays(2)
+switch ($Environment) {
+    "Commercial"   {$cloud = "Global"}
+    "USGovGCC"     {$cloud = "Global"}
+    "USGovGCCHigh" {$cloud = "USGov"}
+    "USGovDoD"     {$cloud = "USGovDoD"}
+    "Germany"      {$cloud = "Germany"}
+    "China"        {$cloud = "China"}            
 }
 
-$Secret = Add-MgApplicationPassword -ApplicationId $GraphApp.Id -PasswordCredential $Params
-
-# Let the secret settle
-
-Write-Host -ForegroundColor Green "$(Get-Date) Sleeping for 60 seconds to allow for client secret replication..."
-Start-sleep 60
-
-# Find a suitable MSAL library - Requires that the ExchangeOnlineManagement module is installed
-$ExoModule = Get-Module -Name "ExchangeOnlineManagement" -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
-
-# Add support for the .Net Core version of the library. Variable doesn't exist in PowerShell v4 and below, 
-# so if it doesn't exist it is assumed that 'Desktop' edition is used
-If ($PSEdition -eq 'Core'){
-    $Folder = "netCore"
-} Else {
-    $Folder = "NetFramework"
+# Supported scope from least to most privileged
+$supportedScopes = @('User.Read.All', 'User.ReadWrite.All', 'Directory.Read.All', 'Directory.ReadWrite.All')
+foreach ($scope in (Get-MgContext).Scopes) {
+    if ($scope -in $supportedScopes) {
+        $scopeInCurrentContext = $true
+        break
+    }
+}
+if (-not($scopeInCurrentContext)) {
+    Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Microsoft Graph..."
+    Connect-MgGraph -ContextScope CurrentUser -Scopes 'User.Read.All', -Environment $cloud -NoWelcome
 }
 
-$MSAL = Join-Path $ExoModule.ModuleBase "$($Folder)\Microsoft.Identity.Client.dll"
-Write-Verbose "$(Get-Date) Loading module from $MSAL"
-Try {Add-Type -LiteralPath $MSAL | Out-Null} Catch {} # Load the MSAL library
-
-# Get a token
-
-# Write-Host -ForegroundColor Green "$(Get-Date) Getting an access token"
-
-$GraphAppDomain = ((Invoke-MgGraphRequest GET "/v1.0/organization" -OutputType PSObject).Value | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.isInitial }).Name
-$authority          = "https://login.microsoftonline.com/$GraphAppDomain"
-$resource           = "https://graph.microsoft.com"
-    
-$ccApp = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($GraphApp.AppId).WithClientSecret($Secret.SecretText).WithAuthority($Authority).Build()
-
-$Scopes = New-Object System.Collections.Generic.List[string]
-$Scopes.Add("$($Resource)/.default")
-
-$MgToken = $ccApp.AcquireTokenForClient($Scopes).ExecuteAsync().GetAwaiter().GetResult()
-If ($MgToken){Write-Verbose "$(Get-Date) Successfully got a token using MSAL for $($Resource)"}
-
-# Get Graph data and continue paging until data collection is complete
-
-Write-Host -ForegroundColor Green "$(Get-Date) Getting users based on inactivity..."
-
-$targetdate = (Get-Date).ToUniversalTime().AddDays(-30).ToString("o")
-
-$Result = @()
-if ($SignInType -eq 'Interactive') {
-    $siFilter = 'signInActivity/lastSignInDateTime'
+$targetdate = (Get-Date).ToUniversalTime().AddDays(-$DaysOfInactivity).ToString("o")
+$result = @()
+switch ($SignInType) {
+    Interactive {$siFilter = 'signInActivity/lastSignInDateTime'}
+    NonInteractive {$siFilter = 'signInActivity/lastNonInteractiveSignInDateTime'}
+    Successful {$siFilter = 'signInActivity/lastSuccessfulSignInDateTime'}
 }
-else {
-    $siFilter = 'signInActivity/lastNonInteractiveSignInDateTime'
+
+# beta endpoint is required for the lastSuccessfulSignInDateTime property
+$apiUrl = "/beta/users?`$filter=$siFilter lt $($targetdate)&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
+Write-Verbose "Initial URL: $apiUrl"
+Write-Host -ForegroundColor Green "$(Get-Date) Getting users based on $DaysOfInactivity days of inactivity..."
+do {
+    # Get data via Graph and continue paging until complete
+    $response = Invoke-MgGraphRequest -Method GET $apiUrl -OutputType PSObject
+    $apiUrl = $($response."@odata.nextLink")
+    if ($apiUrl) { Write-Verbose "@odata.nextLink: $apiUrl" }
+    $result += $response.Value
 }
-$ApiUrl = "https://graph.microsoft.com/beta/users?`$filter=$siFilter lt $($targetdate)&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
+until ($null -eq $response."@odata.nextLink")
 
-Do {
-    $Response = Invoke-MgGraphRequest -Method GET $ApiUrl -Authentication UserProvidedToken -Token ($MgToken.AccessToken | ConvertTo-SecureString -AsPlainText -Force) -OutputType PSObject
-    $ApiUrl = $($Response."@odata.nextLink")
-    If ($ApiUrl) { Write-Verbose "@odata.nextLink: $ApiUrl" }
-    
-    $Result = $Response.Value
+if ($result.Count -gt 0) {
+    # Processing user data to prepare export
+    Write-Host -ForegroundColor Green "$(Get-Date) Processing $($result.Count) returned users..."
 
-} Until ($Null -eq $Response."@odata.nextLink")
-
-# Processing user data to prepare export
-
-Write-Host -ForegroundColor Green "$(Get-Date) Processing returned users..."
-
-$return=@()
-
-foreach ($item in $result) {
-    if ( $null -ne $item.userPrincipalName -and $item.accountEnabled -eq $true) {
-        $Return += New-Object -TypeName PSObject -Property @{
-            UserPrincipalName=$item.userprincipalname
-            LastInteractiveSignIn=$item.signinactivity.lastsignindatetime
-            LastNonInteractiveSignInDateTime=$item.signinactivity.lastNonInteractiveSignInDateTime
-            UserType=$item.usertype
+    $return=@()
+    foreach ($item in $result) {
+        if ($null -ne $item.userPrincipalName -and $item.accountEnabled -eq $true) {
+            $return += New-Object -TypeName PSObject -Property @{
+                UserPrincipalName = $item.userprincipalname
+                LastSuccessfulSignIn = $item.signinactivity.lastSuccessfulSignInDateTime
+                LastInteractiveSignIn = $item.signinactivity.lastsignindatetime
+                LastNonInteractiveSignIn = $item.signinactivity.lastNonInteractiveSignInDateTime
+                UserType = $item.usertype
+            }
         }
     }
-}
 
-# Exporting CSV
-
-Write-Host -ForegroundColor Green "$(Get-Date) Exporting AAD-InactiveUsers.csv in current directory..."  
-
-$return | Select-Object -Property UserPrincipalName,UserType,LastInteractiveSignIn,LastNonInteractiveSignInDateTime | Export-CSV "AAD-InactiveUsers.csv" -NoTypeInformation
-
-# Remove client secret
-Write-Host -ForegroundColor Green "$(Get-Date) Removing any client secrets for the SOA application..."
-$Secrets = (Get-MgApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'").PasswordCredentials
-foreach ($Secret in $Secrets) {
-    # Suppress errors in case a secret no longer exists
-    try {
-        Remove-MgApplicationPassword -ApplicationId $GraphApp.Id -BodyParameter (@{KeyID = $Secret.KeyId})
+    # Export to CSV unless opted out
+    if ($DoNotExportToCSV -eq $false) {
+        Write-Host -ForegroundColor Green "$(Get-Date) Exporting EntraID-InactiveUsers.csv in current directory..."  
+        $return | Select-Object -Property UserPrincipalName,UserType,LastSuccessfulSignIn,LastInteractiveSignIn,LastNonInteractiveSignIn | Export-CSV "EntraID-InactiveUsers.csv" -NoTypeInformation
     }
-    catch {}
+
+    if ($DoNotExportToCSV -eq $true) {
+        $return
+    }
+} else {
+    Write-Host -ForegroundColor Green "$(Get-Date) No users were returned based on the search criteria."
 }
 
+Write-Host -ForegroundColor Green "$(Get-Date) Script has completed."
 # Stop-Transcript
