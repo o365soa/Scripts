@@ -17,7 +17,9 @@
 
 	.DESCRIPTION
         This script will retrieve a list of users who have not signed in for at least a specified number of days.
-        Requires Microsoft.Graph.Authentication module and delegated scope of User.Read.All.
+        Requires Microsoft.Graph.Authentication module.
+        Requires the signed in user to have User.Read.All (or higher) delegated scope. Permissions: https://learn.microsoft.com/en-us/graph/api/user-list?view=graph-rest-1.0&tabs=http#permissions
+        Requires the signed in user to have AuditLog.Read.All delegated scope and a sufficient Entra role (Reports Reader is least priveleged role). Permissions: https://learn.microsoft.com/en-us/graph/api/signin-list?view=graph-rest-1.0&tabs=http#permissions
 
     .PARAMETER SignInType
         Filter users on the type of sign-in: interactive (successful or unsuccessful), non-interactive (successful or unsuccessful),
@@ -36,8 +38,8 @@
         Switch to skip exporting the results to CSV and instead output the result objects to the host.
         
 	.NOTES
-        Version 1.4
-        May 23, 2024
+        Version 1.4.1
+        June 26, 2024
 
 	.LINK
 		about_functions_advanced   
@@ -61,17 +63,31 @@ switch ($Environment) {
     "China"        {$cloud = "China"}            
 }
 
-# Supported scope from least to most privileged
+if (-not(Get-MgContext)) {
+    Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Microsoft Graph..."
+    Connect-MgGraph -ContextScope CurrentUser -Environment $cloud -NoWelcome
+}
+
+$neededScopes = @()
+# Supported scope for Users API from least to most privileged
 $supportedScopes = @('User.Read.All', 'User.ReadWrite.All', 'Directory.Read.All', 'Directory.ReadWrite.All')
 foreach ($scope in (Get-MgContext).Scopes) {
     if ($scope -in $supportedScopes) {
-        $scopeInCurrentContext = $true
+        $userScopeInCurrentContext = $true
         break
     }
 }
-if (-not($scopeInCurrentContext)) {
-    Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Microsoft Graph..."
-    Connect-MgGraph -ContextScope CurrentUser -Scopes 'User.Read.All', -Environment $cloud -NoWelcome
+if ((-not($userScopeInCurrentContext))) {
+    $neededScopes += 'User.Read.All'
+}
+# Supported scope for Sign-ins API
+if ((Get-MgContext).Scopes -notcontains 'AuditLog.Read.All') {
+    $neededScopes += 'AuditLog.Read.All'
+}
+
+if ($neededScopes) {
+    Write-Host -ForegroundColor Green "$(Get-Date) Reconnecting to Microsoft Graph and requesting new scopes..."
+    Connect-MgGraph -ContextScope CurrentUser -Scopes $neededScopes -Environment $cloud -NoWelcome
 }
 
 $targetdate = (Get-Date).ToUniversalTime().AddDays(-$DaysOfInactivity).ToString("o")
