@@ -22,7 +22,7 @@
         You need to be connected with the Exchange Online module in order for this script to run.
         If the module is not installed, run Install-Module ExchangeOnlineManagement, then Connect-ExchangeOnline.
 
-    .PARAMETER DoNotRetainCustomActions
+    .PARAMETER ResetActionsOnly
         Switch to not keep any non-default actions that are enabled for a mailbox. In other words,
         only reset affected mailboxes to the default audit set. Note: Mailboxes that are not missing any default
         actions will not have any non-default actions disabled.
@@ -38,7 +38,7 @@
 #requires -Module ExchangeOnlineManagement
 [CmdletBinding(SupportsShouldProcess)]
 param (
-    [switch]$DoNotRetainCustomActions
+    [switch]$ResetActionsOnly
 )
 
 if (-not(Get-Command -Name Get-Mailbox -ErrorAction SilentlyContinue))
@@ -167,7 +167,7 @@ if ($nonDefaultActionsMB.Count -gt 0)
             Set-Mailbox -Identity $mb.DistinguishedName -DefaultAuditSet Admin,Delegate,Owner
         }
 
-        if ($DoNotRetainCustomActions -eq $false) {
+        if ($ResetActionsOnly -eq $false) {
             # If additional actions were enabled, add them back
             # Actions being added that are already enabled do not result in error
             if ($mb.HasCustomActions -eq $true) {
