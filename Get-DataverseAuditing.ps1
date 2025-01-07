@@ -13,73 +13,105 @@
 
 <#
     .SYNOPSIS
-        Power Platform Dataverse auditing script
+        Gets/Sets Power Platform auditing settings
 
     .DESCRIPTION
         Retrieve the environment-level audit settings for all active environments with a Dataverse
         (excluding Teams-only environments). Can optionally enable environment-level auditing
-        for these environments .
-        The 'Office 365: Security Optimization Assessment' Azure AD application must exist 
-        for the script to function.
+        for these environments.
+        - The 'Microsoft Security Assessment' Entra app registration must exist.
+        - Requires ExchangeOnlineManagement module for the MSAL library distributed with it.
 
     .PARAMETER EnableAuditing
-        Switch to enable the three environment-level audit settings (Audit enabled, Log access, Log read)
-        for every Dataverse. (As a switch, the default value is $false.)
+        Switch to enable the three environment-level settings (Audit enabled, Log access, Log read)
+        for every environment that does not have all three enabled.
+    
+    .PARAMETER RetentionPeriod
+        When used with EnableAuditing, this sets the retention period, in days, for the audit logs.
+        Default is 30. Valid value is -1 (forever) or a number between 1 and 365,000.
+        Note: The period will not be applied in an environment that already has any of the three settings enabled.
 
     .PARAMETER AsJson
         Configure the output file type to be JSON instead of CSV
 
+    .PARAMETER CloudEnvironment
+        Cloud instance of the tenant. Valid values: Commercial, USGovGCC, USGovGCCHigh, USGovDoD, China
+        Default is Commercial.
+
     .EXAMPLE
-        PS C:\> .\Get-DataverseAuditing.ps1 -EnableAuditing
+        .\Get-DataverseAuditing.ps1
+    .EXAMPLE
+        .\Get-DataverseAuditing.ps1 -EnableAuditing
         
     .NOTES
-        Version 1.0
-        21 June 2023
-
-        Jonathan Devere-Ellery
-        Cloud Solution Architect - Microsoft
-
-    .LINK
-        about_functions_advanced   
+        Version 1.1
+        January 6, 2025
 #>
 
 #Requires -Version 5
 #Requires -Modules @{ModuleName="ExchangeOnlineManagement"; ModuleVersion="3.0.0"}
-#Requires -Modules Microsoft.PowerApps.Administration.PowerShell, Microsoft.Graph.Authentication, Microsoft.Graph.Applications
+#Requires -Modules Microsoft.PowerApps.Administration.PowerShell, Microsoft.Graph.Authentication
 
-
+[CmdletBinding()]
 Param(
     [switch]$EnableAuditing,
-    [switch]$AsJson
+    [switch]$AsJson,
+    [string]$CloudEnvironment = 'Commercial',
+    [ValidateScript({if ($_ -eq -1 -or ($_ -ge 1 -and $_ -le 365000)){$true}else{throw "$_ is not valid. Specify a number between 1 and 365000 or -1."}})][Int32]$RetentionPeriod = 30
 )
 
 # Load MSAL
 $ExoModule = Get-Module -Name "ExchangeOnlineManagement" -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
-If ($PSEdition -eq 'Core'){
+if ($PSEdition -eq 'Core'){
     $Folder = "netCore"
-} Else {
+} else {
     $Folder = "NetFramework"
 }
-$MSAL = Join-Path $ExoModule.ModuleBase "$($Folder)\Microsoft.Identity.Client.dll"
+$MSAL = Join-Path -Path $ExoModule.ModuleBase -ChildPath "$($Folder)\Microsoft.Identity.Client.dll"
 Try {Add-Type -LiteralPath $MSAL | Out-Null} Catch {}
 
-Connect-MgGraph -ContextScope Process -Scopes 'Application.ReadWrite.All','User.Read'
+switch ($CloudEnvironment) {
+    "Commercial"   {$cloud = "Global";$authEndpoint = 'https://login.microsoftonline.com'}
+    "USGovGCC"     {$cloud = "Global";$authEndpoint = 'https://login.microsoftonline.com'}
+    "USGovGCCHigh" {$cloud = "USGov";$authEndpoint = 'https://login.microsoftonline.us'}
+    "USGovDoD"     {$cloud = "USGovDoD";$authEndpoint = 'https://login.microsoftonline.us'}
+    "China"        {$cloud = "China";$authEndpoint = 'https://login.partner.microsoftonline.cn'}            
+}
+Connect-MgGraph -ContextScope Process -Scopes 'Application.ReadWrite.All','User.Read' -Environment $cloud -NoWelcome
+if (-not (Get-MgContext)) {
+    Write-Error -Message "Failed to authenticate with Microsoft Graph"
+    exit
+}
 
-$App = Get-MgApplication -Filter "displayName eq 'Office 365 Security Optimization Assessment'" | Where-Object {$_.Web.RedirectUris -Contains "https://security.optimization.assessment.local"}
+# Get the SOA app registration
+try {
+    $App = (Invoke-MgGraphRequest -Method GET -Uri "/v1.0/applications?`$filter=web/redirectUris/any(p:p eq 'https://security.optimization.assessment.local')&`$count=true" -Headers @{'ConsistencyLevel' = 'eventual'} -OutputType PSObject).Value}
+catch {
+    Write-Error -Message "Failed to retrieve the SOA application. If the application does not exist, run 'Install-Module SOA' then 'Install-SOAPrerequisites -EntraAppOnly'."
+    exit
+}
+
+# Build public client that will be used to connect to the Dataverse environments
 $GraphAppDomain = ((Invoke-MgGraphRequest GET "/v1.0/organization" -OutputType PSObject).Value | Select-Object -ExpandProperty VerifiedDomains | Where-Object { $_.isInitial }).Name
-$Authority = "https://login.microsoftonline.com/$GraphAppDomain"
+$Authority = "$authEndpoint/$GraphAppDomain"
 $pubApp = [Microsoft.Identity.Client.PublicClientApplicationBuilder]::Create($App.AppId).WithRedirectUri('https://login.microsoftonline.com/common/oauth2/nativeclient').WithAuthority($Authority).Build()
-
-Write-Host "Select account with Global or Dynamics 365 Administrator:"
+Write-Host "Select an account with Global or Dynamics 365 Administrator role:"
 $pubApp.AcquireTokenInteractive($Scopes).ExecuteAsync().GetAwaiter().GetResult() | Out-Null
+$account = $pubApp.GetAccountsAsync().Result.Username
 
-
+Write-Host "Getting environments..."
+[array]$Environments = Get-AdminPowerAppEnvironment
 $Result = @()
-$account = $PubApp.GetAccountsAsync().Result.Username
-
-$Environments = Get-AdminPowerAppEnvironment
-
+$envCount = 0
+if ($EnableAuditing) {
+    $verbs = "Getting and setting"
+} else {
+    $verbs = "Getting"
+}
+Write-Host "Processing environments..."
 foreach ($instance in $Environments) {
+    $envCount++
+    Write-Progress -Activity "$verbs Dataverse audit settings" -CurrentOperation "Environment $envCount of $($Environments.Count): $($instance.DisplayName)" -PercentComplete (($envCount / $Environments.Count)  * 100)
     $apiUrl = $null
     $apiUrl = $instance.Internal.properties.linkedEnvironmentMetadata.instanceApiUrl
     Write-Verbose "Environment: $($instance.DisplayName)"
@@ -89,7 +121,7 @@ foreach ($instance in $Environments) {
         $scope = New-Object System.Collections.Generic.List[string]
         $scope.Add("$apiUrl/.default")
 
-        $token = $PubApp.AcquireTokenSilent($scope, $account).ExecuteAsync().GetAwaiter().GetResult()
+        $token = $pubApp.AcquireTokenSilent($scope, $account).ExecuteAsync().GetAwaiter().GetResult()
 
         if ($token) {
             Write-Verbose "Successfully retrieved an access token"
@@ -103,50 +135,74 @@ foreach ($instance in $Environments) {
 
             $instVer = [version]$instance.Internal.properties.linkedEnvironmentMetadata.version
             $verStr = "v" + $instVer.Major.ToString() + "." + $instVer.Minor.ToString()
-
-            $response = Invoke-RestMethod -Uri "$apiUrl/api/data/$verStr/organizations?`$select=organizationid,isauditenabled,auditretentionperiodv2,isuseraccessauditenabled,isreadauditenabled" -Headers $headers
-
-            $OrgID = $response.value.organizationid
-
-            $result += New-Object -TypeName psobject -Property @{
-                OrgID = $OrgID
-                EnvDisplayName = $instance.DisplayName
-                EnvState = $instance.Internal.properties.linkedEnvironmentMetadata.instanceState
-                IsAuditEnabled = $response.value.isauditenabled
-                IsAccessAuditEnabled = $response.value.isuseraccessauditenabled
-                IsReadLogsEnabled = $response.value.isreadauditenabled
-                RetentionPeriod = $response.value.auditretentionperiodv2
+            $response = $null
+            try {
+                $response = Invoke-RestMethod -Uri "$apiUrl/api/data/$verStr/organizations?`$select=organizationid,isauditenabled,auditretentionperiodv2,isuseraccessauditenabled,isreadauditenabled" -Headers $headers
+            } catch {
+                Write-Warning -Message "Failed to retrieve data from Dataverse associated with $($instance.DisplayName)."
+                Write-Error $_
             }
+            if ($response) {
+                $OrgID = $response.value.organizationid
 
-            If ($EnableAuditing -and ($response.value.isauditenabled -ne $true -or $response.value.isuseraccessauditenabled -ne $true -or $response.value.isreadauditenabled -ne $true)) {
-                $Headers = @{
-                    'Authorization'="$($token.TokenType) $($token.AccessToken)"
-                    'Content-Type' = 'application/json'
-                    'OData-MaxVersion' = '4.0'
-                    'OData-Version' = '4.0'
-                    'If-Match' = '*'
+                $result += [pscustomobject] [ordered] @{
+                    EnvDisplayName = $instance.DisplayName
+                    OrgID = $OrgID
+                    EnvState = $instance.Internal.properties.linkedEnvironmentMetadata.instanceState
+                    IsAuditEnabled = $response.value.isauditenabled
+                    IsAccessAuditEnabled = $response.value.isuseraccessauditenabled
+                    IsReadLogsEnabled = $response.value.isreadauditenabled
+                    RetentionPeriod = $response.value.auditretentionperiodv2
+                }
+                # Adding these properties even if auditing won't be updated for the environment is so the first object contains all
+                # possible properties so export to CSV will include all columns.
+                if ($EnableAuditing) {
+                    $result[$result.Count - 1] | Add-Member -MemberType NoteProperty -Name 'AuditSettingsUpdated' -Value $null
+                    $result[$result.Count - 1] | Add-Member -MemberType NoteProperty -Name 'RetentionPeriodUpdated' -Value $null
                 }
 
-                $Body = @{
-                    'isauditenabled' = $True
-                    'isuseraccessauditenabled' = $True
-                    'isreadauditenabled' = $True
-                }
-                Write-Verbose "Setting Auditing for $apiUrl"
-                Write-Verbose "OrgID: $OrgID"
+                if ($EnableAuditing -and ($response.value.isauditenabled -ne $true -or $response.value.isuseraccessauditenabled -ne $true -or $response.value.isreadauditenabled -ne $true)) {
+                    $Headers = @{
+                        'Authorization'="$($token.TokenType) $($token.AccessToken)"
+                        'Content-Type' = 'application/json'
+                        'OData-MaxVersion' = '4.0'
+                        'OData-Version' = '4.0'
+                        'If-Match' = '*'
+                    }
 
-                Try {
-                    Invoke-RestMethod -Method Patch -Uri "$apiUrl/api/data/$verStr/organizations($OrgID)" -Headers $Headers -Body ($body | ConvertTo-Json)
-                } Catch {
-                    Write-Warning "Error while making PATCH request to $apiUrl"
+                    $Body = @{
+                        'isauditenabled' = $True
+                        'isuseraccessauditenabled' = $True
+                        'isreadauditenabled' = $True
+                    }
+                    if ($response.value.isauditenabled -ne $true -and $response.value.isuseraccessauditenabled -ne $true -and $response.value.isreadauditenabled -ne $true) {
+                        $Body | Add-Member -MemberType NoteProperty -Name 'auditretentionperiodv2' -Value $RetentionPeriod
+                        $updatePeriod = $true
+                    } else {
+                        $updatePeriod = $false
+                    }
+                    Write-Verbose -Message "Setting Auditing for $apiUrl"
+                    Write-Verbose -Message "OrgID: $OrgID"
+
+                    try {
+                        Invoke-RestMethod -Method Patch -Uri "$apiUrl/api/data/$verStr/organizations($OrgID)" -Headers $Headers -Body ($body | ConvertTo-Json)
+                        $result[$result.Count - 1].AuditSettingsUpdated =  $true
+                        $result[$result.Count - 1].RetentionPeriodUpdated = $(if($updatePeriod){$true}else{$false})
+                    } catch {
+                        Write-Warning "Error while making PATCH request to $apiUrl"
+                        $result[$result.Count - 1].AuditSettingsUpdated = $false
+                    }
                 }
             }
         }
     }
 }
+Write-Progress -Activity "$verbs Dataverse audit settings" -Completed
 
 If ($AsJson) {
     $Result | ConvertTo-Json -Depth 10 | Out-File -FilePath "Dataverse-Auditing.json"
+    Write-Host "Results saved to Dataverse-Auditing.json"
 } Else {
     $Result | Export-Csv -NoTypeInformation -Path "Dataverse-Auditing.csv"
+    Write-Host "Results saved to Dataverse-Auditing.csv"
 }
