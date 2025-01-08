@@ -17,6 +17,7 @@
 
 	.DESCRIPTION
         This script will retrieve a list of users who have not signed in for at least a specified number of days.
+        Requires Micrsoft Entra P1 or P2 license in the tenant.
         Requires Microsoft.Graph.Authentication module.
         Requires the signed in user to have User.Read.All (or higher) delegated scope. Permissions: https://learn.microsoft.com/en-us/graph/api/user-list?view=graph-rest-1.0&tabs=http#permissions
         Requires the signed in user to have AuditLog.Read.All delegated scope and a sufficient Entra role (Reports Reader is least priveleged role). Permissions: https://learn.microsoft.com/en-us/graph/api/signin-list?view=graph-rest-1.0&tabs=http#permissions
@@ -30,16 +31,19 @@
         The number of days of sign-in inactivity for the user to be returned. Default value is 30.
         Note: Users with a null value for the date/time of the sign-in type will not be returned.
     
-    .PARAMETER Environment
-        Cloud environment of the tenant. Possible values are Commercial, USGovGCC, USGovGCCHigh, USGovDoD, Germany, and China.
+    .PARAMETER CloudEnvironment
+        Cloud instance of the tenant. Possible values are Commercial, USGovGCC, USGovGCCHigh, USGovDoD, and China.
         Default value is Commercial.
+
+    .PARAMETER UserType
+        Filter users based on their type. Valid values are Member and Guest. Default is both.
 
     .PARAMETER DoNotExportToCSV
         Switch to skip exporting the results to CSV and instead output the result objects to the host.
         
 	.NOTES
-        Version 1.4.1
-        June 26, 2024
+        Version 1.4.2
+        January 7, 2024
 
 	.LINK
 		about_functions_advanced   
@@ -49,17 +53,17 @@
 param (
     [ValidateSet('Interactive','NonInteractive','Successful')]$SignInType = 'Successful',
     [int]$DaysOfInactivity = 30,
-    [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "Germany", "China")][string]$Environment="Commercial",
+    [ValidateSet("Member", "Guest")][string[]]$UserType = @("Member", "Guest"),
+    [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "China")][string]$CloudEnvironment="Commercial",
     [switch]$DoNotExportToCSV
 )
 
 # Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
-switch ($Environment) {
+switch ($CloudEnvironment) {
     "Commercial"   {$cloud = "Global"}
     "USGovGCC"     {$cloud = "Global"}
     "USGovGCCHigh" {$cloud = "USGov"}
     "USGovDoD"     {$cloud = "USGovDoD"}
-    "Germany"      {$cloud = "Germany"}
     "China"        {$cloud = "China"}            
 }
 
@@ -98,8 +102,9 @@ switch ($SignInType) {
     Successful {$siFilter = 'signInActivity/lastSuccessfulSignInDateTime'}
 }
 
-# beta endpoint is required for the lastSuccessfulSignInDateTime property
-$apiUrl = "/beta/users?`$filter=$siFilter lt $($targetdate)&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
+# Filtering on signInActivity cannot be used with any other filterable properties, so filtering on userType is performed client-side
+# https://learn.microsoft.com/en-us/entra/identity/monitoring-health/howto-manage-inactive-user-accounts
+$apiUrl = "/v1.0/users?`$filter=$siFilter lt $($targetdate)&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
 Write-Verbose "Initial URL: $apiUrl"
 Write-Host -ForegroundColor Green "$(Get-Date) Getting users based on $DaysOfInactivity days of inactivity..."
 do {
@@ -113,29 +118,35 @@ until ($null -eq $response."@odata.nextLink")
 
 if ($result.Count -gt 0) {
     # Processing user data to prepare export
-    Write-Host -ForegroundColor Green "$(Get-Date) Processing $($result.Count) returned users..."
+    #Write-Host -ForegroundColor Green "$(Get-Date) Processing $($result.Count) returned users..."
 
     $return=@()
     foreach ($item in $result) {
-        if ($null -ne $item.userPrincipalName -and $item.accountEnabled -eq $true) {
-            $return += New-Object -TypeName PSObject -Property @{
-                UserPrincipalName = $item.userprincipalname
-                LastSuccessfulSignIn = $item.signinactivity.lastSuccessfulSignInDateTime
-                LastInteractiveSignIn = $item.signinactivity.lastsignindatetime
-                LastNonInteractiveSignIn = $item.signinactivity.lastNonInteractiveSignInDateTime
-                UserType = $item.usertype
+        if (($UserType -contains "Member" -and $item.UserType -eq "Member") -or ($UserType -contains "Guest" -and $item.UserType -eq "Guest")) {
+            if ($null -ne $item.userPrincipalName -and $item.accountEnabled -eq $true) {
+                $return += New-Object -TypeName PSObject -Property @{
+                    UserPrincipalName = $item.userprincipalname
+                    LastSuccessfulSignIn = $item.signinactivity.lastSuccessfulSignInDateTime
+                    LastInteractiveSignIn = $item.signinactivity.lastsignindatetime
+                    LastNonInteractiveSignIn = $item.signinactivity.lastNonInteractiveSignInDateTime
+                    UserType = $item.usertype
+                }
             }
         }
     }
 
-    # Export to CSV unless opted out
-    if ($DoNotExportToCSV -eq $false) {
-        Write-Host -ForegroundColor Green "$(Get-Date) Exporting EntraID-InactiveUsers.csv in current directory..."  
-        $return | Select-Object -Property UserPrincipalName,UserType,LastSuccessfulSignIn,LastInteractiveSignIn,LastNonInteractiveSignIn | Export-CSV "EntraID-InactiveUsers.csv" -NoTypeInformation
-    }
+    if ($return.Count -gt 0) {
+        # Export to CSV unless opted out
+        if ($DoNotExportToCSV -eq $false) {
+            Write-Host -ForegroundColor Green "$(Get-Date) Exporting EntraID-InactiveUsers.csv in current directory..."  
+            $return | Select-Object -Property UserPrincipalName,UserType,LastSuccessfulSignIn,LastInteractiveSignIn,LastNonInteractiveSignIn | Export-CSV "EntraID-InactiveUsers.csv" -NoTypeInformation
+        }
 
-    if ($DoNotExportToCSV -eq $true) {
-        $return
+        if ($DoNotExportToCSV -eq $true) {
+            $return
+        }
+    } else {
+        Write-Host -ForegroundColor Green "$(Get-Date) No users match the search criteria."
     }
 } else {
     Write-Host -ForegroundColor Green "$(Get-Date) No users were returned based on the search criteria."
