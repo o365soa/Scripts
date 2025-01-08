@@ -33,26 +33,27 @@
 		of email addresses or objects with an EmailAddress or PrimarySMTPAddress property, such as
 		with Get-Mailbox.
 	.Parameter Cloud
-		Office 365 environment which hosts the mailboxes. Valid values are Commercial, USGovGCC, Germany, China.
-		Default value is Commercial. The feature is not available in GCC High and DoD. Unknown if available in Germany and China.
+		Office 365 environment which hosts the mailboxes. Valid values are Commercial, USGovGCC, China.
+		Default value is Commercial. The feature is not available in GCC High and DoD. Unknown if available in China.
 	.Example
 		Get-MailboxOWAStorageProvider johndoe@contoso.com
 		Get-Mailbox -RecipientTypeDetails UserMailbox -ResultSize unlimited | Get-MailboxOWAStorageProvider
 	.Notes
-		Version: 1.0
-		Date: January 31, 2024
+		Version: 1.1
+		Date: January 7, 2025
 #>
 
 [CmdletBinding()]
 param (
 	[Parameter(Mandatory=$true,ValueFromPipelinebyPropertyName=$true,Position=0)][Alias('PrimarySMTPAddress')][string]$EmailAddress,
-	[ValidateSet('Commercial','USGovGCC','Germany','China')][string]$Cloud = 'Commercial'
+	[ValidateSet('Commercial','USGovGCC','China')][string]$Cloud = 'Commercial'
 )
 
 begin {
 	# Variables
 	$tenantDomain = 'tenantname.onmicrosoft.com' #Default routing domain of the tenant
 	$appId = '00000000-0000-0000-0000-000000000000' #Application ID of the app registration in Entra ID with EWS permission
+	# End variables
 
 	if ($tenantDomain -like "tenantname*" -or $appId -like "00000000*") {
 		Write-Error "The tenant domain or application ID has not been specified in the Variables section of the `"begin`" block."
@@ -100,9 +101,6 @@ begin {
 	switch ($Cloud) {
 	    'Commercial'    { $base = 'https://login.microsoftonline.com/';$ewsUrl = 'https://outlook.office365.com'}
 	    'USGovGCC'      { $base = 'https://login.microsoftonline.com/';$ewsUrl = 'https://outlook.office365.com'}
-	    #'USGovGCCHigh'  { $base = 'https://login.microsoftonline.us/';$ewsUrl = 'https://outlook.office365.us'}
-	    #'USGovDoD'      { $base = 'https://login.microsoftonline.us/';$ewsUrl = 'https://webmail.apps.mil'}
-	    'Germany'       { $base = 'https://login.microsoftonline.de/';$ewsUrl = 'https://outlook.office.de'}
 	    'China'         { $base = 'https://login.partner.microsoftonline.cn/';$ewsUrl = 'https://partner.outlook.cn'}
 	}
 	# Build public client app and get access token
