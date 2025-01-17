@@ -112,7 +112,7 @@ do {
     $response = Invoke-MgGraphRequest -Method GET $apiUrl -OutputType PSObject
     $apiUrl = $($response."@odata.nextLink")
     if ($apiUrl) { Write-Verbose "@odata.nextLink: $apiUrl" }
-    $result.AddRange($response.value)
+    $result.AddRange($response.value) | Out-Null
 }
 until ($null -eq $response."@odata.nextLink")
 
