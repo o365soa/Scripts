@@ -95,7 +95,7 @@ if ($neededScopes) {
 }
 
 $targetdate = (Get-Date).ToUniversalTime().AddDays(-$DaysOfInactivity).ToString("o")
-$result = @()
+$result = New-Object -TypeName System.Collections.ArrayList
 switch ($SignInType) {
     Interactive {$siFilter = 'signInActivity/lastSignInDateTime'}
     NonInteractive {$siFilter = 'signInActivity/lastNonInteractiveSignInDateTime'}
@@ -112,7 +112,7 @@ do {
     $response = Invoke-MgGraphRequest -Method GET $apiUrl -OutputType PSObject
     $apiUrl = $($response."@odata.nextLink")
     if ($apiUrl) { Write-Verbose "@odata.nextLink: $apiUrl" }
-    $result += $response.Value
+    $result.AddRange($response.value)
 }
 until ($null -eq $response."@odata.nextLink")
 
