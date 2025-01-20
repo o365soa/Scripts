@@ -220,7 +220,7 @@ if (-not $ExcludeRoleBreakdown) {
             # Get Entra ID object to determine its type
             $dirObject = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/directoryObjects/$($member.principalId)?`$select=id" -OutputType PSObject
             if ($dirObject."@odata.type" -eq "#microsoft.graph.group") {
-                # v1.0 endpoint does not return service princiapls, but they are not relevant for this script
+                # v1.0 endpoint does not return service principals, but they are not relevant for this script
                 $mgm = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/groups/$($member.principalId)/transitiveMembers?`$top=999&`$select=id,accountEnabled,userType" -OutputType PSObject
                 # The parent group of nested members is also returned, so filter out the group
                 foreach ($mMember in ($mgm.value | Where-Object {$_."@odata.type" -ne "#microsoft.graph.group"})) {

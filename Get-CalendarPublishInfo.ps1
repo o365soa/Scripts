@@ -18,7 +18,7 @@
 		This script exports mailbox calendar publishing settings
 
 	.DESCRIPTION
-	    Iterates through mailboxes and outputs all with (anonymous) calender publishing enabled, including sharing level.
+	    Iterates through mailboxes and outputs all with (anonymous) calendar publishing enabled, including sharing level.
 
     .PARAMETER  OutCsv
         Will export the results to a CSV File in the script root called Get-CalendarPublishInfo.csv
