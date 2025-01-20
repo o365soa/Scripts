@@ -322,7 +322,7 @@ if ($HTML) {
     <main role='main' class='container-fluid'>
         <div class='jumbotron'>
             <h1>MFA Report</h1> 
-            <p>MFA report generated: $(Get-Date)</p>"
+            <p class='lead'>Report generated: $(Get-Date -UFormat "%A, %d %B, %Y %T")</p>"
     if ($IncludePerUserState -or $IncludeGuests -or $IncludeDisabledUsers) {
         $includeOptions = @()
         $includeString = "Included options: "
@@ -334,7 +334,9 @@ if ($HTML) {
             <p>$includeString</p>
             "
     }
-    $HTMLOutput += "<p>User details row color scheme:"
+    $HTMLOutput += "
+        <div class='card card-body alert alert-info'>
+            <h5>Colors used within this report:</h5>"
     if ($IncludePerUserState) {
         $HTMLOutput += "
             <div class='table-danger'>Per-user MFA disabled</div>
@@ -346,13 +348,15 @@ if ($HTML) {
             "
         }
         $HTMLOutput += "
-            </p>
+                </p>
+            </div>
         </div>
         "
     } else {
         $HTMLOutput += "
-            <div class='table-danger'>MFA registration not complete</div>
-            </p>
+                <div class='table-danger'>MFA registration not complete</div>
+                </p>
+            </div>
         </div>
         "
     }
@@ -360,7 +364,7 @@ if ($HTML) {
     if ($IncludePerUserState) {
         $HTMLOutput += "
         <div class='card'>
-            <div class='card-header'>
+            <div class='card-header h3'>
                 Summary of MFA Enforcement State
             </div>
             <div class='card-body'>
@@ -406,7 +410,7 @@ if ($HTML) {
     }
     $HTMLOutput += "
     <div class='card mt-4'>
-        <div class='card-header'>
+        <div class='card-header h3'>
             Summary of MFA Registration
         </div>
         <div class='card-body'>
@@ -473,7 +477,7 @@ if ($HTML) {
             $HTMLOutput += "
 
             <div class='card mt-4'>
-            <div class='card-header'>
+            <div class='card-header h3'>
                 Summary of MFA Registration - $($role.Name)
             </div>
             <div class='card-body'>
@@ -528,7 +532,7 @@ if ($HTML) {
             $HTMLOutput += "
             </table>
             <p><strong>Users in Role</strong></p>
-            <table class='table table-sm table-striped'>
+            <table class='table table-sm table-striped table-hover'>
             <thead class='thead-light'>
                 <tr>
                     <th scope='col'>User Principal Name</th>"
@@ -592,9 +596,10 @@ if ($HTML) {
     $HTMLOutput += "
     
     <div class='card mt-4'>
-    <div class='card-header'>User List</div>
+    <div class='card-header h3'>User List</div>
+    <div class='card-body'>
 
-    <table class='table table-sm table-striped'>
+    <table class='table table-sm table-striped table-hover'>
     <thead class='thead-light'>
         <tr>
             <th scope='col'>User Principal Name</th>"
@@ -654,6 +659,7 @@ if ($HTML) {
     # Closing
     $HTMLOutput += "
     </table>
+    </div>
     </div>
     </main>
     </body>
