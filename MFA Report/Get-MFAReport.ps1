@@ -170,7 +170,7 @@ foreach ($user in $result) {
     # Registered FIDO2 device name(s)
     $fidoDevice = @()
     foreach ($device in ($authMethods.value | Where-Object {$_."@odata.type" -eq "#microsoft.graph.fido2AuthenticationMethod"})) {
-        $fidoDevice += "$device.displayName ($($device.model))"
+        $fidoDevice += "$($device.displayName) ($($device.model))"
     }
 
     # Registered 3P software OTP devices
