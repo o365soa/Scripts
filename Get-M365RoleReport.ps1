@@ -466,7 +466,7 @@ if ($pUsers.Count -gt 0) {
 	$culture = [System.Globalization.CultureInfo]::CurrentCulture
 	$textInfo = $culture.TextInfo
 
-	$Report = "<html><head><link rel='stylesheet' href='https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-beta.3/css/bootstrap.min.css' integrity='sha384-Zug+QiDoJOrZ5t4lssLdxGhVrurbmBWopoEl+M6BdEfwnCJZtKxi1KgxUyJq13dy' crossorigin='anonymous'></head><body>"
+	$Report = "<html><head><link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css' integrity='sha384-xOolHFLEh07PJGoPkLv1IbcEPTNtaed2xpHsD9ESMhqIYd0nLMwNLD69Npy4HI+N' crossorigin='anonymous'></head><body>"
 	$Report += "<div class='jumbotron jumbotron-fluid'>
 	<div class='container'>
 	  <h1 class='display-4'>Microsoft 365 Admin Role Assignment Report</h1>
@@ -489,7 +489,7 @@ if ($pUsers.Count -gt 0) {
 			Role: $($r.Name)
 			</div>"
 
-			$Report += "<div class='card-body'><table class='table'>
+			$Report += "<div class='card-body'><table class='table table-striped table-hover'>
 			<thead>
 			<tr>
 				<th>Sign-in Name</th>
