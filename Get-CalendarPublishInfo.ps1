@@ -11,51 +11,45 @@
 #documentation, even if Microsoft has been advised of the possibility of such damages.
 ############################################################################
  
-#Requires -Version 4
+#Requires -Modules ExchangeOnlineManagement
 
 <#
 	.SYNOPSIS
 		This script exports mailbox calendar publishing settings
 
 	.DESCRIPTION
-	    Iterates through mailboxes and dumps calender folder permissions, shows publishing permissions.
+	    Iterates through mailboxes and outputs all with (anonymous) calendar publishing enabled, including sharing level.
 
-        This script is useful for highlighting users that have anonymous calendar sharing turned on.
-
-    .PARAMETER  OutCSV
+    .PARAMETER  OutCsv
         Will export the results to a CSV File in the script root called Get-CalendarPublishInfo.csv
 
 	.EXAMPLE
-		PS C:\> .\Get-CalendarPublishInfo.ps1
+		.\Get-CalendarPublishInfo.ps1
 
 	.EXAMPLE
-		PS C:\> .\Get-CalendarPublishInfo.ps1 -OutCSV
+		.\Get-CalendarPublishInfo.ps1 -OutCSV
 
 	.NOTES
-		Cam Murray
-		Field Engineer - Microsoft
-		cam.murray@microsoft.com
-		
 		For updates, and more scripts, visit https://github.com/O365AES/Scripts
-		
-		Last update: 29 March 2017
-
-	.LINK
-		about_functions_advanced
-
+        Version 1.1
+        January 6, 2025
 #>
 
-Param(
+param(
      [switch]$OutCSV
 )
 
 $cfs = @()
+$i = 1
 
-ForEach($mailbox in (Get-Mailbox -ResultSize Unlimited | select Identity,UserPrincipalName)) {
-    Write-Verbose "Checking $($mailbox.Identity)"
+$mailboxes = Get-ExoMailbox -ResultSize Unlimited | Select-Object -Property Identity,UserPrincipalName,DisplayName
+foreach ($mailbox in $mailboxes) {
+    Write-Progress -Activity "Getting calendar publishing details" -Status "Processing mailbox $($mailbox.DisplayName)" -PercentComplete ($i/$mailboxes.Count*100)
 
     # Get users calendar folder settings for their default Calendar folder
-    $cf=Get-MailboxCalendarFolder -Identity "$($mailbox.Identity):\Calendar" 
+    # Get localized folder name
+	$primaryCalendarPath = Get-MailboxFolderStatistics -Identity $mailbox.UserPrincipalName -FolderScope Calendar | Where-Object {$_.FolderType -eq 'Calendar'} | Select-Object -ExpandProperty FolderPath
+    $cf = Get-MailboxCalendarFolder -Identity "$($mailbox.UserPrincipalName):\$($primaryCalendarPath.Substring(1))"
     
     # If publishing is turned on, add to the result set
     if($cf.PublishEnabled -eq $true) {
@@ -67,15 +61,17 @@ ForEach($mailbox in (Get-Mailbox -ResultSize Unlimited | select Identity,UserPri
             PublishedICalUrl=$cf.PublishedICalUrl
         }
     }
+    $i++
 }
+Write-Progress -Activity "Getting calendar publishing details" -Status " " -Completed
 
-# Export to csv if required
+# Export to CSV if specified
 if($cfs.Count -gt 0) {
-    if($OutCSV) {
-        $cfs | export-csv -Path "$PSScriptRoot\Get-CalendarPublishInfo.csv" -NoTypeInformation -NoClobber
+    if($OutCsv) {
+        $cfs | Export-Csv -Path "$PSScriptRoot\Get-CalendarPublishInfo.csv" -NoTypeInformation -NoClobber
     } else {
         return $cfs
     }
 } else {
-    Write-Host "No users with publishing enabled"
+    Write-Host "No users have calendar publishing enabled"
 }

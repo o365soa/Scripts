@@ -12,65 +12,96 @@
 ############################################################################
 
 #Requires -Version 4
+#Requires -Modules @{ModuleName='Microsoft.Graph.Authentication';ModuleVersion='2.0.0'}
 
 <#
 	.SYNOPSIS
 		Creates a report in either CSV or HTML format of all MFA enrollment.
-
 	.DESCRIPTION
         This script generates a report in either CSV or HTML format for all MFA enrollment
 
         HTML format uses the opensource bootstrap libraries for a tidy interface.
-
-	.EXAMPLE
-		PS C:\> .\Get-MFASettings.ps1
-
+    .PARAMETER Output
+        The name (including optional path) of the file for the report. If not specified, the default is mfa-report.csv or mfa-report.html, depending on the output format.
+    .PARAMETER CloudEnvironment
+        The cloud instance that hosts the tenant. Used to set the endpoints for authentication and connection.
+        Value can be Commercial, USGovGCC, USGovGCCHigh, USGovDoD, China. Default is Commercial.
+    .PARAMETER IncludePerUserState
+        Include the per-user MFA state in the report.
+    .PARAMETER IncludeDisabledUsers
+        Include disabled users in the report.
+    .PARAMETER IncludeGuests
+        Include guest users in the report.
+    .PARAMETER IgnoreRoles
+        An array of roles, by display name, to not include in the report. Default is Guest Inviter, Partner Tier1 Support,
+        Partner Tier2 Support, Directory Readers, Directory Synchronization Accounts, Device Users, Device Join, Workplace Device Join.
+	.PARAMETER ExcludeRoleBreakdown
+        Do not include a breakdown of Entra roles that have users in the HTML report.
+    .EXAMPLE
+		.\Get-MFAReport.ps1 -CSV
+    .EXAMPLE
+        .\Get-MFAReport.ps1 -HTML -IncludeGuests
 	.NOTES
-		Cam Murray
-		Field Engineer - Microsoft
-		cam.murray@microsoft.com
-		
-		For updates, and more scripts, visit https://github.com/O365SOA/Scripts
-		
-		Last update: Feb 2019
-
+		Version 2.0
+		January 16, 2025
 	.LINK
 		about_functions_advanced
 
 #>
 
-Param(
+param(
   [string]$Output,
-  [Array]$IgnoreRoles=@("Guest Inviter","Partner Tier1 Support","Partner Tier2 Support","Directory Readers","Device Users","Device Join","Workplace Device Join"),
-
+  [array]$IgnoreRoles=@("Guest Inviter","Partner Tier1 Support","Partner Tier2 Support","Directory Readers","Directory Synchronization Accounts","Device Users","Device Join","Workplace Device Join"),
+  [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "China")][string]$CloudEnvironment="Commercial",
+  [switch]$IncludePerUserState,
+  [switch]$IncludeDisabledUsers,
+  [switch]$IncludeGuests,
+  [switch]$ExcludeRoleBreakdown,
   [Parameter(ParameterSetName='CSVOutput')]
-
-  [switch]$CSV,
-
+    [switch]$CSV,
   [Parameter(ParameterSetName='HTMLOutput')]
-
-  [switch]$HTML
-
- )
+    [switch]$HTML
+)
 
  # Build a default output file if none specified
- If(!$output) {
-    If($CSV) {
+ if (!$output) {
+    if ($CSV) {
         $Output = "mfa-report.csv"
     }
-    If($HTML) {
+    if ($HTML) {
         $Output = "mfa-report.html"
     }
- }
+}
 
- # Determine if connected to MSOL
- Try {
-     Get-MsolCompanyInformation -ErrorAction:Stop | Out-Null
- } Catch {
-     Write-Error "Error running MSOL command, ensure you run Connect-MsolService first!"
-     Exit
- }
+# Directory.Read.All = Least common scope for Users and DirectoryObjects APIs
+# UserAuthenticationMethod.Read.All = Scope for Authentication Methods, Sign-In Preferences, and System-Preferred MFA Method APIs. Must also have Entra role of either Global Reader or Authentication Administrator or Privileged Authentication Administrator
+# Policy.Read.All = Scope for Authentication Requirements API. Must also have Entra role of either Global Reader or Authentication Policy Administrator
+# RoleManagement.Read.Directory = Scope for Role Definitions and Role Assignments APIs. Must also have Entra role of User Administrator or higher
 
+$requiredScopes = @('Directory.Read.All','UserAuthenticationMethod.Read.All','Policy.Read.All')
+if (-not $ExcludeRoleBreakdown) {
+    $requiredScopes += 'RoleManagement.Read.Directory'
+}
+$currentScopes = (Get-MgContext).Scopes
+if ($currentScopes) {
+    foreach ($scope in $requiredScopes) {
+        if ($currentScopes -notcontains $scope) {
+            $scopeNeeded = $true
+            break
+        }
+    }
+}
+if ($scopeNeeded -or -not $currentScopes) {
+    switch ($CloudEnvironment) {
+        "Commercial"   {$cloud = "Global"}
+        "USGovGCC"     {$cloud = "Global"}
+        "USGovGCCHigh" {$cloud = "USGov"}
+        "USGovDoD"     {$cloud = "USGovDoD"}
+        "China"        {$cloud = "China"}            
+    }
+    Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Microsoft Graph..."
+    Connect-MgGraph -ContextScope Process -Scopes $requiredScopes -Environment $cloud -NoWelcome
+}
  <# 
  
     User Checking
@@ -79,71 +110,167 @@ Param(
  
  #>
 
-Write-Host "$(Get-Date) Getting all MSOL Users - this may take some time.."
-$MFAUsers = @()
+Write-Host "$(Get-Date) Getting all users. This may take some time..."
+$result = New-Object -TypeName System.Collections.ArrayList
+$apiUrl = "/v1.0/users?`$select=id,userPrincipalName,accountEnabled,userType"
+do {
+    Write-Progress -Id 1 -Activity "Getting Users..."
+    $response = Invoke-MgGraphRequest -Method GET -Uri $apiUrl -OutputType PSObject
+    $apiUrl = $response."@odata.nextLink"
+    if ($apiUrl) { Write-Verbose "@odata.nextLink: $ApiUrl" }
+    $result.AddRange($response.Value) | Out-Null
+} until ($null -eq $response."@odata.nextLink" )
 
-ForEach($User in (Get-MsolUser -All)) {
-
-    Write-Progress -Id 1 -Activity "Parsing MFA Users.." -Status $($User.UserPrincipalName)
+Write-Host "$(Get-Date) Getting strong authentication settings for all users. This may take some time..."
+$mfaUsers = New-Object -TypeName System.Collections.ArrayList
+$mfaUserIds = New-Object -TypeName System.Collections.ArrayList
+$i = 0
+$culture = [System.Globalization.CultureInfo]::CurrentCulture
+$textInfo = $culture.TextInfo
+foreach ($user in $result) {
+    $i++
+    if ($IncludeDisabledUsers -eq $false -and $user.accountEnabled -eq $false) {
+        continue
+    }
+    if ($IncludeGuests -eq $false -and $user.userType -eq "Guest") {
+        continue
+    }
+    Write-Progress -Id 1 -Activity "Processing Users for Strong Auth Details..." -Status $($user.userPrincipalName) -PercentComplete ($i / $result.Count * 100) 
 
     # Reset variables
-    $Default = $null; $MFAState = $null; $PhoneAppType = $null;
+    $defaultMethod = $null; $mfaState = $null; $mfaMobilePhone = $null; $phoneAppDevice = $null; $fidoDevice = $null; $softwareOTP = $null, $helloDevice = $null
 
     # Get the default MFA option
-    $Default = ($User.StrongAuthenticationMethods | Where-Object {$_.IsDefault -eq $true}).MethodType
-
-    # If StrongAuthenticationRequirements is not set
-    If($($User.StrongAuthenticationRequirements.State) -eq $null) {
-        $MFAState = "Not Set"
+    $signInPreferences = Invoke-MgGraphRequest -Method GET -Uri "/beta/users/$($user.id)/authentication/signInPreferences"
+    if ($signInPreferences.isSystemPreferredAuthenticationMethodEnabled -eq $true) {
+        $defaultMethod = $signInPreferences.systemPreferredAuthenticationMethod
     } else {
-        $MFAState = $($User.StrongAuthenticationRequirements.State)
+        $defaultMethod = $signInPreferences.userPreferredMethodForSecondaryAuthentication
     }
 
-    # If PhoneAppType is specified convert to string and replace commas for CSV compat
-    If($User.StrongAuthenticationPhoneAppDetails.AuthenticationType) {
-        $PhoneAppType = $($User.StrongAuthenticationPhoneAppDetails.AuthenticationType.ToString().Replace(",","+"))
+    # Get per-user MFA state
+    if ($IncludePerUserState) {
+        $authRequirements = Invoke-MgGraphRequest -Method GET -Uri "/beta/users/$($user.id)/authentication/requirements"
+        $mfaState = $textInfo.ToTitleCase($authRequirements.perUserMfaState)
     }
 
-    # Add to variable
-    $MFAUsers += New-Object -TypeName psobject -Property @{
-		UserPrincipalName=$($User.UserPrincipalName)
-		State=$MFAState
-        Phone=$($User.StrongAuthenticationUserDetails.PhoneNumber)
-        PhoneAppDevice=$($User.StrongAuthenticationPhoneAppDetails.DeviceName)
-        PhoneAppType=$PhoneAppType
-        Default=$Default
-        ObjectId=$($User.ObjectId)
+    # Get user's registered auth methods
+    $authMethods = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/users/$($user.id)/authentication/methods" -OutputType PSObject
+
+    # MFA Phone Number for mobile phone
+    $mfaMobilePhone = ($authMethods.value | Where-Object {$_.id -eq '3179e48a-750b-4051-897c-87b9720928f7'}).phoneNumber
+    # MFA Phone Number for office phone
+    #$mfaOfficePhone = ($authMethods.value | Where-Object {$_.id -eq 'e37fc753-ff3b-4958-9484-eaa9425c82bc'}).phoneNumber
+    # MFA Phone Number for alternate phone
+    #$mfaAltPhone = ($authMethods.value | Where-Object {$_.id -eq 'b6332ec1-7057-4abe-9331-3d72feddfe417'}).phoneNumber
+
+    # Registered device name(s) for MS Authenticator
+    $phoneAppDevice = ($authMethods.value | Where-Object {$_."@odata.type" -eq "#microsoft.graph.microsoftAuthenticatorAuthenticationMethod"}).displayName -join ' | '
+
+    # Registered FIDO2 device name(s)
+    $fidoDevice = @()
+    foreach ($device in ($authMethods.value | Where-Object {$_."@odata.type" -eq "#microsoft.graph.fido2AuthenticationMethod"})) {
+        $fidoDevice += "$($device.displayName) ($($device.model))"
     }
+
+    # Registered 3P software OTP devices
+    $softwareOTP = ($authMethods.value | Where-Object {$_."@odata.type" -eq "#microsoft.graph.softwareOathAuthenticationMethod"}).id -join ' | '
+
+    # Registered Hello for Business devices
+    $helloDevice = ($authMethods.value | Where-Object {$_."@odata.type" -eq "#microsoft.graph.windowsHelloForBusinessAuthenticationMethod"}).displayName -join ' | '
+
+    # Add to collection
+    $userDetails = New-Object -TypeName psobject -Property @{
+		UserPrincipalName=$user.UserPrincipalName
+        MobilePhone=$mfaMobilePhone
+        PhoneAppDevice=$phoneAppDevice
+        FIDO2Device=$fidoDevice -join ' | '
+        SoftwareOATH=$softwareOTP
+        HelloForBusiness=$helloDevice
+        Default=$defaultMethod
+        Id=$user.id
+    }
+    if ($IncludePerUserState) {
+        $userDetails | Add-Member -MemberType NoteProperty -Name MFAState -Value $mfaState
+    }
+    if ($IncludeDisabledUsers) {
+        $userDetails | Add-Member -MemberType NoteProperty -Name AccountState -Value $(if($user.accountEnabled){"Enabled"}else{"Disabled"})
+    }
+    if ($IncludeGuests) {
+        $userDetails | Add-Member -MemberType NoteProperty -Name UserType -Value $user.userType
+    }
+    $mfaUsers.Add($userDetails) | Out-Null
+    $mfaUserIds.Add($user.id) | Out-Null
 }
+if (-not $ExcludeRoleBreakdown) {
+    $roleUsers = New-Object -TypeName System.Collections.ArrayList
 
-$RoleUsers = @()
+    Write-Host "$(Get-Date) Getting Entra Role Member Status. This may take some time..."
+    $mRoles = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/roleManagement/directory/roleDefinitions?`$select=id,displayName" -OutputType PSObject
+    $rolesToProcess = $mRoles.value | Where-Object {$_.displayName -notin $IgnoreRoles} | Sort-Object -Property displayName
+    $i = 0
+    foreach ($role in $rolesToProcess) {
+        $i++
+        Write-Progress -Id 1 -Activity "Parsing Role Members" -Status $($role.displayName)
 
-Write-Host "$(Get-Date) Getting Role Member Status.. this may take sometime.."
-
-ForEach($Role in (Get-MsolRole)) {
-
-    If($IgnoreRoles -notcontains $Role.Name) {
-        Write-Progress -Id 1 -Activity "Parsing Group Users" -Status $($Role.Name)
-
-        # Get members of this role
-        $RoleMembers = Get-MsolRoleMember -RoleObjectId $Role.ObjectId -All | Where-Object {$_.RoleMemberType -eq "User"}
-    
-        # Loop through each and add settings
-        ForEach($RoleMember in $RoleMembers) {
-    
-            # Get responding user object
-            $User = $MFAUsers | Where-Object {$_.ObjectId -eq $($RoleMember.ObjectId)}
-    
-            # Add to array
-            $RoleUsers += New-Object -TypeName PSObject -Property @{
-                UserPrincipalName=$($User.UserPrincipalName)
-                Role=$($Role.Name)
-                State=$User.State
-                Phone=$($User.Phone)
-                PhoneAppDevice=$($User.PhoneAppDevice)
-                PhoneAppType=$User.PhoneAppType
-                Default=$User.Default
+        # Get active user members of the role, accounting for group assignments
+        $mRoleMembers = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/roleManagement/directory/roleAssignments?`$filter=roleDefinitionId eq '$($role.id)'" -OutputType PSObject
+        $memberToProcess = @()
+        foreach ($member in $mRoleMembers.value) {
+            # Get Entra ID object to determine its type
+            $dirObject = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/directoryObjects/$($member.principalId)?`$select=id" -OutputType PSObject
+            if ($dirObject."@odata.type" -eq "#microsoft.graph.group") {
+                # v1.0 endpoint does not return service principals, but they are not relevant for this script
+                $mgm = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/groups/$($member.principalId)/transitiveMembers?`$top=999&`$select=id,accountEnabled,userType" -OutputType PSObject
+                # The parent group of nested members is also returned, so filter out the group
+                foreach ($mMember in ($mgm.value | Where-Object {$_."@odata.type" -ne "#microsoft.graph.group"})) {
+                    if ($IncludeDisabledUsers -eq $false -and $mMember.accountEnabled -eq $false) {
+                        continue
+                    }
+                    if ($IncludeGuests -eq $false -and $mMember.userType -eq "Guest") {
+                        continue
+                    }
+                    # Include member only if not already assigned role directly or from another group
+                    if ($mMember.id -notin $memberToProcess) {
+                        $memberToProcess += $mMember.id
+                    }
+                }
+            } elseif ($dirObject."@odata.type" -eq "#microsoft.graph.user" -and $dirObject.id -notin $memberToProcess) {
+                $memberToProcess += $dirObject.id
             }
+        }
+        # Loop through each and add settings
+        foreach ($roleMember in $memberToProcess) {
+            $rUser = $null
+            # Get user details from collection based on its position (faster than using Where-Object with large collections)
+            try {
+                $user = $mfaUsers[$mfaUserIds.IndexOf($roleMember)]
+            } catch {
+                # User not found in collection
+                continue
+            }
+
+            # Add role user to collection
+            $rUser = New-Object -TypeName PSObject -Property @{
+                UserPrincipalName=$user.UserPrincipalName
+                Role=$role.displayName
+                MobilePhone=$user.MobilePhone
+                PhoneAppDevice=$user.PhoneAppDevice
+                Default=$user.Default
+                FIDO2Device=$user.FIDO2Device
+                SoftwareOATH=$user.SoftwareOATH
+                HelloForBusiness=$user.HelloForBusiness
+            }
+            if ($IncludePerUserState) {
+                $rUser | Add-Member -MemberType NoteProperty -Name MFAState -Value $user.MFAState
+            }
+            if ($IncludeDisabledUsers) {
+                $rUser | Add-Member -MemberType NoteProperty -Name AccountState -Value $user.AccountState
+            }
+            if ($IncludeGuests) {
+                $rUser | Add-Member -MemberType NoteProperty -Name UserType -Value $user.UserType
+            }
+            $roleUsers.Add($rUser) | Out-Null
         }
     }
 }
@@ -159,70 +286,85 @@ ForEach($Role in (Get-MsolRole)) {
 
 Write-Host "$(Get-Date) Generating Output to $($Output)"
 
-If($CSV) {
-
-    <#
-    
-        CSV Generation
-    
-    #>
-
-    $MFAUsers | Select UserPrincipalName,State,Default,Phone,PhoneAppDevice,PhoneAppType | Export-CSV -NoTypeInformation $Output
-
+if ($CSV) {
+    $props = @("UserPrincipalName")
+    if ($IncludeGuests) {$props += "UserType"}
+    if ($IncludeDisabledUsers) {$props += "AccountState"}
+    if ($IncludePerUserState) {$props += "MFAState"}
+    $props += "MobilePhone","PhoneAppDevice","PhoneAppType","FIDO2Device","SoftwareOATH","HelloForBusiness","Default"
+    $mfaUsers | Select-Object -Property $props | Export-CSV -NoTypeInformation $Output   
 }
 
-If($HTML) {
-
-    <#
-    
-        HTML Generation
-        Slightly more complicated because we use bootstrap.
-
-    #>
-
+if ($HTML) {
     # Stats generation
-
-    $GroupedState = ($MFAUsers | Group-Object State)
-
-    $mfa_Total = $MFAUsers.Count
-
-    $mfa_NotSet = ($GroupedState | Where-Object {$_.Name -eq "Not Set"}).Count
-    $mfa_NotSet_pct = [Math]::Round($($mfa_NotSet)/$($mfa_Total)*100)
-
-    $mfa_Enabled = ($GroupedState | Where-Object {$_.Name -eq "Enabled"}).Count
-    $mfa_Enabled_pct = [Math]::Round($($mfa_Enabled)/$($mfa_Total)*100)
-
-    $mfa_Enforced = ($GroupedState | Where-Object {$_.Name -eq "Enforced"}).Count
-    $mfa_Enforced_pct = [Math]::Round($($mfa_Enforced)/$($mfa_Total)*100)
-    
-
+    if ($IncludePerUserState) {
+        $groupedState = $mfaUsers | Group-Object -Property MFAState
+        $mfa_disabled = ($groupedState | Where-Object {$_.Name -eq "disabled"}).Count
+        $mfa_enabled = ($groupedState | Where-Object {$_.Name -eq "enabled"}).Count
+        $mfa_enforced = ($groupedState | Where-Object {$_.Name -eq "enforced"}).Count
+    }
 
     # Enrollment stats
+    $mfaDefaultSet = $mfaUsers | Where-Object {$_.Default}
+    $mfaDefaultNotSet = $mfaUsers | Where-Object {-not $_.Default}
 
-    $MFADefaultSet = ($MFAUsers | Where-Object {$_.Default -ne $Null})
-    $MFADefaultNotSet = ($MFAUsers | Where-Object {$_.Default -eq $Null})
-
-    $mfa_Methods_Group = ($MFADefaultSet | Group-Object Default)
-
-    $Roles = ($RoleUsers | Group-Object Role)
+    $roles = $roleUsers | Group-Object -Property Role
 
     # Header
     $HTMLOutput = "
     <html>
     <head>
-    <script src='https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js'></script>
-    <link href='https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css' rel='stylesheet' integrity='sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T' crossorigin='anonymous'>
+    <script src='https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js' integrity='sha384-Fy6S3B9q64WdZWQUiU+q4/2Lc9npb8tCaSX9FK7E8HnRr0Jz8D6OP9dO5Vg3Q9ct' crossorigin='anonymous'></script>
+    <link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css' integrity='sha384-xOolHFLEh07PJGoPkLv1IbcEPTNtaed2xpHsD9ESMhqIYd0nLMwNLD69Npy4HI+N' crossorigin='anonymous'>
     </head>
     <body>
     
-    <main role='main' class='container'>
+    <main role='main' class='container-fluid'>
         <div class='jumbotron'>
             <h1>MFA Report</h1> 
-            <p>MFA report generated at $(Get-Date)</p>
+            <p class='lead'>Report generated: $(Get-Date -UFormat "%A, %d %B, %Y %T")</p>"
+    if ($IncludePerUserState -or $IncludeGuests -or $IncludeDisabledUsers) {
+        $includeOptions = @()
+        $includeString = "Included options: "
+        if ($IncludePerUserState) {$includeOptions += "Per-user MFA state"}
+        if ($IncludeGuests) {$includeOptions += " Guest users"}
+        if ($IncludeDisabledUsers) {$includeOptions += " Disabled users"}
+        $includeString += $($includeOptions -join ", ")
+        $HTMLOutput += "
+            <p>$includeString</p>
+            "
+    }
+    $HTMLOutput += "
+        <div class='card card-body alert alert-info'>
+            <h5>Colors used within this report:</h5>"
+    if ($IncludePerUserState) {
+        $HTMLOutput += "
+            <div class='table-danger'>Per-user MFA disabled</div>
+            <div class='table-warning'>Per-user MFA enabled or enforced by MFA registration not complete</div>
+        "
+        if (-not $ExcludeRoleBreakdown) {
+            $HTMLOutput += "
+            <div class='table-success'>Per-user MFA enforced and user registered (Role breakdown only)</div>
+            "
+        }
+        $HTMLOutput += "
+                </p>
+            </div>
         </div>
-        
+        "
+    } else {
+        $HTMLOutput += "
+                <div class='table-danger'>MFA registration not complete</div>
+                </p>
+            </div>
+        </div>
+        "
+    }
+
+    if ($IncludePerUserState) {
+        $HTMLOutput += "
         <div class='card'>
-            <div class='card-header'>
+            <div class='card-header h3'>
                 Summary of MFA Enforcement State
             </div>
             <div class='card-body'>
@@ -233,10 +375,10 @@ If($HTML) {
                         <div class='col-sm'>
                             <div class='card text-white bg-danger mb-3' style='max-width: 18rem;'>
                                 <div class='card-header'>
-                                    <center>Not Set</center>
+                                    <center>Disabled</center>
                                 </div>
                                 <div class='card-body'>
-                                    <center><h5 class='card-title'>$($mfa_NotSet)</h5></center>
+                                    <center><h5 class='card-title'>$($mfa_disabled)</h5></center>
                                 </div>
                             </div>
                         </div>
@@ -246,7 +388,7 @@ If($HTML) {
                                     <center>Enabled</center>
                                 </div>
                                 <div class='card-body'>
-                                    <center><h5 class='card-title'>$($mfa_Enabled)</h5></center>
+                                    <center><h5 class='card-title'>$($mfa_enabled)</h5></center>
                                 </div>
                             </div>
                         </div>
@@ -256,7 +398,7 @@ If($HTML) {
                                 <center>Enforced</center>
                             </div>
                             <div class='card-body'>
-                                <center><h5 class='card-title'>$($mfa_Enforced)</h5></center>
+                                <center><h5 class='card-title'>$($mfa_enforced)</h5></center>
                             </div>
                             </div>
                         </div>
@@ -264,215 +406,252 @@ If($HTML) {
                 </div>
             </div>
         </div>
-
-    <div class='card mt-4'>
-        <div class='card-header'>
-            Summary of MFA Enrollment
-        </div>
-        <div class='card-body'>
-            <p><Strong>User MFA Breakdown by Enrollment</Strong></p>
-
-            <div class='container'>
-                <div class='row'>
-                    <div class='col'>
-                        <div class='card text-white bg-danger mb-3' style='max-width: 18rem;'>
-                            <div class='card-header'>
-                                <center>Not Enrolled</center>
-                            </div>
-                            <div class='card-body'>
-                                <center><h5 class='card-title'>$($MFADefaultNotSet.Count)</h5></center>
-                            </div>
-                        </div>
-                    </div>
-                    <div class='col'>
-                        <div class='card text-white bg-success mb-3' style='max-width: 18rem;'>
-                            <div class='card-header'>
-                                <center>Enrolled</center>
-                            </div>
-                            <div class='card-body'>
-                                <center><h5 class='card-title'>$($MFADefaultSet.Count)</h5></center>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-        <p><Strong>User MFA Enrollment Breakdown by Default Method</Strong></p>
-        <table class='table'>
-        "
-
-        ForEach($Type in $($MFADefaultSet | Group-Object Default | Sort-Object Count -Descending)) {
-
-            $PCTTotal = [Math]::Round(($Type.Count/$MFADefaultSet.Count)*100)
-            $HTMLOutput += "
-            <tr>
-            <td style='width: 200px'>
-            <p><strong>$($Type.Name)</strong></p>
-            <p><i>$($Type.Count) of $($MFADefaultSet.Count) ($PCTTotal%)</i></p>
-            </td>
-            <td>
-            <div class='progress'>
-                <div class='progress-bar progress-bar-striped bg-success' role='progressbar' style='width: $($PCTTotal)%' aria-valuenow='$($PCTTotal)' aria-valuemin='0' aria-valuemax='100'></div>
-            </div>
-            </td>
-            </tr>"
-            
-        }
-
-
-        $HTMLOutput += "
-        </table>
-        </div>
-    </div>"
-
-    # Create the per role break down summary
-
-    ForEach ($Role in $Roles) {
-
-        $MFARoleDefaultSet = @($Role.Group | Where-Object {$_.Default -ne $Null})
-        $MFARoleDefaultNotSet = @($Role.Group | Where-Object {$_.Default -eq $Null})
-
-    $HTMLOutput += "
-
-    <div class='card mt-4'>
-        <div class='card-header'>
-            Summary of MFA Enrollment - $($Role.Name)
-        </div>
-        <div class='card-body'>
-            <p><Strong>$($Role.Name) MFA Breakdown by Enrollment</Strong></p>
-
-            <div class='container'>
-                <div class='row'>
-                    <div class='col'>
-                        <div class='card text-white bg-danger mb-3' style='max-width: 18rem;'>
-                            <div class='card-header'>
-                                <center>Not Enrolled</center>
-                            </div>
-                            <div class='card-body'>
-                                <center><h5 class='card-title'>$($MFARoleDefaultNotSet.Count)</h5></center>
-                            </div>
-                        </div>
-                    </div>
-                    <div class='col'>
-                        <div class='card text-white bg-success mb-3' style='max-width: 18rem;'>
-                            <div class='card-header'>
-                                <center>Enrolled</center>
-                            </div>
-                            <div class='card-body'>
-                                <center><h5 class='card-title'>$($MFARoleDefaultSet.Count)</h5></center>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-        <p><Strong>User MFA Enrollment Breakdown by Default Method</Strong></p>
-        <table class='table'>
-        "
-
-        ForEach($Type in $($MFARoleDefaultSet | Group-Object Default | Sort-Object Count -Descending)) {
-
-            $PCTTotal = [Math]::Round(($Type.Count/$MFARoleDefaultSet.Count)*100)
-            $HTMLOutput += "
-            <tr>
-            <td style='width: 200px'>
-            <p><strong>$($Type.Name)</strong></p>
-            <p><i>$($Type.Count) of $($MFARoleDefaultSet.Count) ($PCTTotal%)</i></p>
-            </td>
-            <td>
-            <div class='progress'>
-                <div class='progress-bar progress-bar-striped bg-success' role='progressbar' style='width: $($PCTTotal)%' aria-valuenow='$($PCTTotal)' aria-valuemin='0' aria-valuemax='100'></div>
-            </div>
-            </td>
-            </tr>"
-            
-        }
-
-
-        $HTMLOutput += "
-        </table>
-        <p><strong>Users in Role</strong></p>
-        <table class='table table-striped table-dark'>
-        <thead>
-            <tr>
-                <th scope='col'>UserPrincipalName</th>
-                <th scope='col'>State</th>
-                <th scope='col'>Default</th>
-                <th scope='col'>Phone Number</th>
-                <th scope='col'>Phone App Device</th>
-                <th scope='col'>Phone App Type</th>
-            </tr>
-        </thead>"
-
-            # Add rows for each MFA User
-    ForEach($U in $($Role.Group | Sort-Object UserPrincipalName)) {
-
-        # Enrollment colour scheming
-        If($U.State -eq "Not Set") {
-            $TRClass = ""
-        } ElseIf($U.State -eq "Enabled") {
-            $TRClass = "bg-warning"
-        } Else {
-            $TRClass = "bg-success"
-        }
-
-        $HTMLOutput += "
-        <tr class='$($TRClass)'>
-            <td>$($u.UserPrincipalName)</td>
-            <td>$($u.State)</td>
-            <td>$($u.Default)</td>
-            <td>$($u.Phone)</td>
-            <td>$($u.PhoneAppDevice)</td>
-            <td>$($u.PhoneAppType)</td>
-        </tr>
         "
     }
-
-        $HTMLOutput += "</table>
+    $HTMLOutput += "
+    <div class='card mt-4'>
+        <div class='card-header h3'>
+            Summary of MFA Registration
         </div>
-    </div>"
+        <div class='card-body'>
+            <p><Strong>User MFA Breakdown by Registration</Strong></p>
+
+            <div class='container'>
+                <div class='row'>
+                    <div class='col'>
+                        <div class='card text-white bg-danger mb-3' style='max-width: 18rem;'>
+                            <div class='card-header'>
+                                <center>Not Registered</center>
+                            </div>
+                            <div class='card-body'>
+                                <center><h5 class='card-title'>$($mfaDefaultNotSet.Count)</h5></center>
+                            </div>
+                        </div>
+                    </div>
+                    <div class='col'>
+                        <div class='card text-white bg-success mb-3' style='max-width: 18rem;'>
+                            <div class='card-header'>
+                                <center>Registered</center>
+                            </div>
+                            <div class='card-body'>
+                                <center><h5 class='card-title'>$($mfaDefaultSet.Count)</h5></center>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        <p><Strong>User MFA Registration Breakdown by Default Method</Strong></p>
+        <table class='table'>
+        "
+
+        foreach ($type in $($mfaDefaultSet | Group-Object -Property Default | Sort-Object -Property Count -Descending)) {
+            $pctTotal = [math]::Round(($type.Count/$mfaDefaultSet.Count)*100)
+            $HTMLOutput += "
+            <tr>
+            <td style='width: 200px'>
+            <p><strong>$($type.Name)</strong></p>
+            <p><i>$($type.Count) of $($mfaDefaultSet.Count) ($pctTotal%)</i></p>
+            </td>
+            <td>
+            <div class='progress'>
+                <div class='progress-bar progress-bar-striped bg-success' role='progressbar' style='width: $($pctTotal)%' aria-valuenow='$($pctTotal)' aria-valuemin='0' aria-valuemax='100'></div>
+            </div>
+            </td>
+            </tr>
+            "
+        }
+
+        $HTMLOutput += "
+        </table>
+        </div>
+        </div>
+        "
+
+    if (-not $ExcludeRoleBreakdown) {
+        # Create the per-role breakdown summary
+        foreach ($role in $roles) {
+            $mfaRoleDefaultSet = @($role.Group | Where-Object {$_.Default})
+            $mfaRoleDefaultNotSet = @($role.Group | Where-Object {-not $_.Default})
+
+            $HTMLOutput += "
+
+            <div class='card mt-4'>
+            <div class='card-header h3'>
+                Summary of MFA Registration - $($role.Name)
+            </div>
+            <div class='card-body'>
+                <p><Strong>$($Role.Name) MFA Breakdown by Registration</Strong></p>
+
+                <div class='container'>
+                    <div class='row'>
+                        <div class='col'>
+                            <div class='card text-white bg-danger mb-3' style='max-width: 18rem;'>
+                                <div class='card-header'>
+                                    <center>Not Registered</center>
+                                </div>
+                                <div class='card-body'>
+                                    <center><h5 class='card-title'>$($mfaRoleDefaultNotSet.Count)</h5></center>
+                                </div>
+                            </div>
+                        </div>
+                        <div class='col'>
+                            <div class='card text-white bg-success mb-3' style='max-width: 18rem;'>
+                                <div class='card-header'>
+                                    <center>Registered</center>
+                                </div>
+                                <div class='card-body'>
+                                    <center><h5 class='card-title'>$($mfaRoleDefaultSet.Count)</h5></center>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            <p><Strong>User MFA Registration Breakdown by Default Method</Strong></p>
+            <table class='table'>
+            "
+
+            foreach ($type in $($mfaRoleDefaultSet | Group-Object -Property Default | Sort-Object -Property Count -Descending)) {
+                $pctTotal = [math]::Round(($type.Count/$mfaRoleDefaultSet.Count)*100)
+                $HTMLOutput += "
+                <tr>
+                <td style='width: 200px'>
+                <p><strong>$($type.Name)</strong></p>
+                <p><i>$($type.Count) of $($mfaRoleDefaultSet.Count) ($pctTotal%)</i></p>
+                </td>
+                <td>
+                <div class='progress'>
+                    <div class='progress-bar progress-bar-striped bg-success' role='progressbar' style='width: $($pctTotal)%' aria-valuenow='$($pctTotal)' aria-valuemin='0' aria-valuemax='100'></div>
+                </div>
+                </td>
+                </tr>
+                "
+            }
+
+            $HTMLOutput += "
+            </table>
+            <p><strong>Users in Role</strong></p>
+            <table class='table table-sm table-striped table-hover'>
+            <thead class='thead-light'>
+                <tr>
+                    <th scope='col'>User Principal Name</th>"
+
+            if ($IncludeGuests) {$HTMLOutput += "<th scope='col'>User Type</th>"}
+            if ($IncludeDisabledUsers) {$HTMLOutput += "<th scope='col'>Account State</th>"}
+            if ($IncludePerUserState) {$HTMLOutput += "<th scope='col'>MFA State</th>"}
+            $HTMLOutput += "
+                    <th scope='col'>Mobile Phone</th>
+                    <th scope='col'>Phone App Device</th>
+                    <th scope='col'>FIDO2 Device</th>
+                    <th scope='col'>Software OATH</th>
+                    <th scope='col'>Hello for Business</th>
+                    <th scope='col'>Default</th>
+                </tr>
+            </thead>"
+
+            # Add rows for each MFA User
+            foreach ($u in $($role.Group | Sort-Object -Property UserPrincipalName)) {
+                if ($IncludePerUserState) {
+                    # Enrollment color scheme
+                    if ($u.MFAState -eq "Disabled") {
+                        $TRClass = "table-danger"
+                    } elseif ($u.MFAState -eq "Enabled") {
+                        $TRClass = "table-warning"
+                    } elseif (-not $u.Default) {
+                        $TRClass = "table-warning"
+                    } else {
+                        $TRClass = ""
+                    }
+                } elseif (-not $u.Default) {
+                    $TRClass = "table-danger"
+                } else {
+                    $TRClass = ""
+                }
+
+                $HTMLOutput += "
+                <tr class='$($TRClass)'>
+                    <td>$($u.UserPrincipalName)</td>
+                    "
+                if ($IncludeGuests) {$HTMLOutput += "<td>$($u.UserType)</td>"}
+                if ($IncludeDisabledUsers) {$HTMLOutput += "<td>$($u.AccountState)</td>"}
+                if ($IncludePerUserState) {$HTMLOutput += "<td>$($u.MFAState)</td>"}
+                $HTMLOutput += "
+                    <td>$($u.MobilePhone)</td>
+                    <td>$($u.PhoneAppDevice.Replace(' | ','<br>'))</td>
+                    <td>$($u.FIDO2Device.Replace(' | ','<br>'))</td>
+                    <td>$($u.SoftwareOATH.Replace(' | ','<br>'))</td>
+                    <td>$($u.HelloForBusiness.Replace(' | ','<br>'))</td>
+                    <td>$($u.Default)</td>
+                </tr>
+                "
+            }
+
+            $HTMLOutput += "</table>
+            </div>
+            </div>"
+        }
     }
 
     $HTMLOutput += "
     
     <div class='card mt-4'>
-        <div class='card-header'>
-        User List
-        </div>
+    <div class='card-header h3'>User List</div>
+    <div class='card-body'>
 
-        <table class='table table-striped table-dark'>
-        <thead>
-            <tr>
-                <th scope='col'>UserPrincipalName</th>
-                <th scope='col'>State</th>
-                <th scope='col'>Default</th>
-                <th scope='col'>Phone Number</th>
-                <th scope='col'>Phone App Device</th>
-                <th scope='col'>Phone App Type</th>
-            </tr>
-        </thead>
+    <table class='table table-sm table-striped table-hover'>
+    <thead class='thead-light'>
+        <tr>
+            <th scope='col'>User Principal Name</th>"
+    if ($IncludeGuests) {$HTMLOutput += "<th scope='col'>User Type</th>"}
+    if ($IncludeDisabledUsers) {$HTMLOutput += "<th scope='col'>Account State</th>"}
+    if ($IncludePerUserState) {$HTMLOutput += "<th scope='col'>MFA State</th>"}
+    $HTMLOutput += "
+            <th scope='col'>Mobile Phone</th>
+            <th scope='col'>Phone App Device</th>
+            <th scope='col'>FIDO2 Device</th>
+            <th scope='col'>Software OATH</th>
+            <th scope='col'>Hello for Business</th>
+            <th scope='col'>Default</th>
+        </tr>
+    </thead>
     "
 
     # Add rows for each MFA User
-    ForEach($U in $($MFAUsers | Sort-Object UserPrincipalName)) {
+    foreach($u in $($mfaUsers | Sort-Object -Property UserPrincipalName)) {
 
-        # Enrollment colour scheming
-        If($U.State -eq "Not Set") {
+        # Enrollment color scheme
+        if ($IncludePerUserState) {
+            # Enrollment color scheme
+            if ($u.MFAState -eq "Disabled") {
+                $TRClass = "table-danger"
+            } elseif ($u.MFAState -eq "Enabled") {
+                $TRClass = "table-warning"
+            } elseif (-not $u.Default) {
+                $TRClass = "table-warning"
+            } else {
+                $TRClass = ""
+            }
+        } elseif (-not $u.Default) {
+            $TRClass = "table-danger"
+        } else {
             $TRClass = ""
-        } ElseIf($U.State -eq "Enabled") {
-            $TRClass = "bg-warning"
-        } Else {
-            $TRClass = "bg-success"
         }
 
         $HTMLOutput += "
         <tr class='$($TRClass)'>
             <td>$($u.UserPrincipalName)</td>
-            <td>$($u.State)</td>
+            "
+        if ($IncludeGuests) {$HTMLOutput += "<td>$($u.UserType)</td>"}
+        if ($IncludeDisabledUsers) {$HTMLOutput += "<td>$($u.AccountState)</td>"}
+        if ($IncludePerUserState) {$HTMLOutput += "<td>$($u.MFAState)</td>"}
+        $HTMLOutput += "
+            <td>$($u.MobilePhone)</td>
+            <td>$($u.PhoneAppDevice.Replace(' | ','<br>'))</td>
+            <td>$($u.FIDO2Device.Replace(' | ','<br>'))</td>
+            <td>$($u.SoftwareOATH.Replace(' | ','<br>'))</td>
+            <td>$($u.HelloForBusiness.Replace(' | ','<br>'))</td>
             <td>$($u.Default)</td>
-            <td>$($u.Phone)</td>
-            <td>$($u.PhoneAppDevice)</td>
-            <td>$($u.PhoneAppType)</td>
         </tr>
         "
     }
@@ -481,13 +660,13 @@ If($HTML) {
     $HTMLOutput += "
     </table>
     </div>
+    </div>
     </main>
     </body>
     </html>
     "
 
     # Output
-
     $HTMLOutput | Out-File -FilePath $Output
 
 }

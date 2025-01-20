@@ -26,34 +26,38 @@
 	.Parameter SPOAdmin
 		UPN of the admin account that has, or will be temporarily granted, site admin permission (unless
         SPOPermissionOptOut is True).
+    .PARAMETER SPOAdminDomain
+        If not already connected to SharePoint Online and a custom (vanity) domain is used to connect
+        (such as MTE customers), this is the FQDN used to connect to the SPO administrative endpoint.
 	.Parameter SPOTenantName
-		Name of the tenant, which is the subdomain value of the .onmicrosoft.com domain, e.g.,
-		"contoso" for contoso.onmicrosoft.com.  If not already connected to SPO and the value is not
-		entered via the parameter, you will be asked to enter it in order to continue.
+		If not already connected to SharePoint Online, this is the name of the tenant, which is the 
+        subdomain value of the onmicrosoft domain, e.g., "contoso" for contoso.onmicrosoft.com.
 	.Parameter SPOPermissionOptOut
 		If the SPOAdmin needs to be added as a site admin to be able to retrieve the list of site admins,
 		use this switch if you don't want to add the account as a site admin (and, therefore, skip
 		checking any site that would need the account added in order get the list of admins).  If added,
 		the permission is removed after the site is checked.
     .Parameter IncludeOneDriveSites
-        Include OneDrive for Business sites.
-    .Parameter Environment
-        When expanding groups, sets endpoints to use for Microsoft Graph for tenants in sovereign clouds. 
-        The accepted values are Commercial [Default],USGovGCC, USGovGCCHigh, USGovDoD, Germany, China.
+        Switch to include OneDrive for Business sites.
+    .Parameter CloudEnvironment
+        The cloud instance that hosts the tenant. Used to set the endpoints for authentication and connection.
+        Value can be Commercial, USGovGCC, USGovGCCHigh, USGovDoD, China. Default is Commercial.
     .Parameter DoNotExpandGroups
         Do not get the recursive membership of groups assigned site admin.
 	.Notes
-		Version: 2.4
-		Date: May 23, 2024
+		Version: 2.5
+		Date: January 13, 2025
 #>
 [CmdletBinding()]
 Param(
     [Parameter(Mandatory=$false)][string]$OutputDir = (Get-Location).Path,
     [Parameter(Mandatory=$true)][string]$SPOAdmin,
+    [ValidateScript({if (Resolve-DnsName -Name $PSItem) {$true} else {throw "SPO admin domain does not resolve.  Verify you entered a valid fully qualified domain name."}})]
+        [ValidateNotNullOrEmpty()][string]$SPOAdminDomain,
     [string]$SPOTenantName,
     [switch]$SPOPermissionOptOut,
     [switch]$IncludeOneDriveSites,
-    [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "Germany", "China")][string]$Environment="Commercial",
+    [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "China")][string]$CloudEnvironment="Commercial",
     [switch]$DoNotExpandGroups
 )
 
@@ -263,17 +267,24 @@ function Get-GroupMembers {
     }
 }
 
-function Get-SPOAdminsList
-{
+function Get-SPOAdminsList {
     try {
-        Get-SpoTenant -ErrorAction Stop | Out-Null
+        Get-SPOTenant -ErrorAction Stop | Out-Null
     } catch {
-        if (-not($SPOTenantName)) {
-			$SPOTenantName = Read-Host -Prompt "Enter the tenant name (without the .onmicrosoft.com (or .us) suffix)"
-		}
-		$siteUrl = "https://$SPOTenantName-admin.sharepoint.com"
-		Write-Verbose "$(Get-Date) Connect to SPO tenant admin URL: $($siteUrl)"
-		Connect-SPOService -Url $siteUrl
+        if ($SPOAdminDomain) {
+            Connect-SPOService -Url $SPOAdminDomain | Out-Null
+        } else {
+            if (-not $SPOTenantName) {
+                $SPOTenantName = Read-Host -Prompt "Enter the tenant name (without the onmicrosoft domain suffix)"
+            }
+            switch ($CloudEnvironment) {
+                "Commercial"   {Connect-SPOService -Url "https://$SPOTenantName-admin.sharepoint.com" | Out-Null}
+                "USGovGCC"     {Connect-SPOService -Url "https://$SPOTenantName-admin.sharepoint.com" | Out-Null}
+                "USGovGCCHigh" {Connect-SPOService -Url "https://$SPOTenantName-admin.sharepoint.us" -Region ITAR | Out-Null}
+                "USGovDoD"     {Connect-SPOService -Url "https://$SPOTenantName-admin.dps.mil" -Region ITAR | Out-Null}
+                "China"        {Connect-SPOService -Url "https://$SPOTenantName-admin.sharepoint.cn" -Region China | Out-Null}
+            }
+        }
 	}
 
     #Get list of sites
@@ -422,12 +433,11 @@ if ($DoNotExpandGroups -eq $false) {
     }
     Import-Module -Name Microsoft.Graph.Authentication -MinimumVersion 2.0.0
 
-    switch ($Environment) {
+    switch ($CloudEnvironment) {
         "Commercial"   {$cloud = 'Global'}
         "USGovGCC"     {$cloud = 'Global'}
         "USGovGCCHigh" {$cloud = 'USGov'}
         "USGovDoD"     {$cloud = 'USGovDoD'}
-        "Germany"      {$cloud = 'Germany'}
         "China"        {$cloud = 'China'}
     }
     Write-Host -ForegroundColor Green "$(Get-Date) Connecting to Microsoft Graph with delegated authentication..."
