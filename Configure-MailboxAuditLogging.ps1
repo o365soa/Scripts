@@ -31,8 +31,8 @@
         would be updated and which recommended actions are not enabled.
     
     .NOTES
-        Version 3.0.0
-        December 31, 2024
+        Version 3.0.1
+        April 11, 2025
 #>
 
 #requires -Module ExchangeOnlineManagement
@@ -85,7 +85,7 @@ function Compare-AuditActions ($mailbox) {
         }
     }
 
-    if ($missingActions) {
+    if ($missingAuditOwner -or $missingAuditDelegate -or $missingAuditAdmin) {
         return New-Object -TypeName psobject -Property @{
             IsMissingDefaultActions = $true
             MissingActionsAdmin = $missingAuditAdmin
@@ -100,7 +100,7 @@ function Compare-AuditActions ($mailbox) {
 }
 
 # Get all mailboxes because client-side processing is necessary
-Write-Host "$(Get-Date) Getting all non-Group mailboxes..." -ForegroundColor Green
+Write-Host "$(Get-Date) Getting all mailboxes..." -ForegroundColor Green
 [array]$allMailboxes = Get-EXOMailbox -ResultSize Unlimited -Properties DefaultAuditSet,AuditAdmin,AuditDelegate,AuditOwner,PersistedCapabilities
 
 Write-Host "$(Get-Date) $($allMailboxes.Count) mailboxes were returned." -ForegroundColor Green
