@@ -36,8 +36,8 @@
 	.PARAMETER Output
 		Path and filename of the report.  Default is M365RoleReport.html in the current directory.
 	.NOTES
-        Version 3.0
-		January 8, 2025
+        Version 3.1
+		April 25, 2025
 		
 		This script uses Bootstrap to format the report. For more information https://www.getbootstrap.com/
 
@@ -55,9 +55,9 @@ Param(
 
 function Get-UserDetails ($id) {
 	# Use cached object if user has already been retrieved
-	if ($directoryObjects.ContainsKey($id)) {
+	if ($objectDetails.ContainsKey($id)) {
 		Write-Verbose -Message "User $id has previoulsy been retrieved. Using cached details."
-		return $directoryObjects[$id]
+		return $objectDetails[$id]
 	}
 	$dirObject = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/directoryObjects/$($id)?`$select=id,displayName" -OutputType PSObject
 	if ($dirObject."@odata.type" -eq "#microsoft.graph.user") {
@@ -112,7 +112,7 @@ function Get-UserDetails ($id) {
         MFAState = $mfaState
         UserType = $type
     }
-	$script:directoryObjects.Add($id,$details)
+	$script:objectDetails.Add($id,$details)
 	return $details
 }
 
@@ -289,9 +289,11 @@ if ($SkipWorkload -notcontains 'EXO') {
 	}
 }
 
-$pUsers = @() 
+$pUsers = New-Object -TypeName System.Collections.ArrayList
 # Hash tables for storing objects so they only need to be looked up once
-$directoryObjects = @{}
+$objectDetails = @{}
+# Hash table for storing Entra role member directory objects so they only need to be looked up once
+$entraRoleMemberDirObjects = @{}
 
 #Process Entra roles
 if ($SkipWorkload -notcontains 'EntraID') {
@@ -304,31 +306,66 @@ if ($SkipWorkload -notcontains 'EntraID') {
 		$i++
 		Write-Progress -Activity "Entra Role Assignments" -CurrentOperation "Role: $($mRole.displayName)" -PercentComplete (($i/$rolesToProcess.Count) * 100)
 		Write-Verbose -Message "Processing role $($mRole.displayName)"
-		$mRoleUsers = @()
+		$mRoleMembers = @()
 
 		# Get the members
 		# Not using expand=principal because it returns all member properties, which is unnecessary
-		$mRoleUsers = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/roleManagement/directory/roleAssignments?`$filter=roleDefinitionId eq '$($mRole.id)'" -OutputType PSObject
+		$mRoleMembers = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/roleManagement/directory/roleAssignments?`$filter=roleDefinitionId eq '$($mRole.id)'" -OutputType PSObject
 
 	    # Iterate each member
-	    foreach ($mRoleUser in $mRoleUsers.value) {
-			Write-Verbose -Message "Member assigned $($mRole.displayName) role: $($mRoleUser.principalId)"
-			
-		    # Get member details
-	        $mUser = Get-UserDetails -id $mRoleUser.principalId
+	    foreach ($mRoleMember in $mRoleMembers.value) {
+			# Use cached object if member object has already been looked up
+			if ($entraRoleMemberDirObjects.ContainsKey($mRoleMember.principalId)) {
+				Write-Verbose -Message "Entra role member $($mRoleMember.principalId) has previoulsy been retrieved. Using cached object."
+				$memberDirObject = $entraRoleMemberDirObjects[$mRoleMember.principalId]
+			} else {
+				$memberDirObject = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/directoryObjects/$($mRoleMember.principalId)?`$select=id,displayName" -OutputType PSObject
+				$entraRoleMemberDirObjects.Add($mRoleMember.principalId,$memberDirObject)
+			}
+			# If member is a role-assignable group, get the members of the group
+			if ($memberDirObject."@odata.type" -eq "#microsoft.graph.group") {
+				# Beta endpoint is used because service principals are not returned in v1.0
+				$mGroupMembers = Invoke-MgGraphRequest -Method GET -Uri "/beta/groups/$($memberDirObject.id)/members?`$top=999&`$select=id" -OutputType PSObject
+				foreach ($mGroupMember in $mGroupMembers.value) {
+					Write-Verbose -Message "Member assigned $($mRole.displayName) role: $($memberDirObject.displayName)\$($mGroupMember.id)"
+					
+					# Get member details
+					$mUser = Get-UserDetails -id $mGroupMember.id
+					
+					# Add to final object
+					$memberDetails = New-Object -TypeName PSObject -Property @{
+						SignInName = $memberDirObject.displayName + "\" + $mUser.SignInName
+						PasswordAge = $mUser.PasswordAge
+						Role = $mRole.displayName
+						MFAState = $mUser.MFAState
+						MFADefault = $mUser.MFADefault
+						MFAPhone = $mUser.MFAPhone
+						UserType = $mUser.UserType
+						AccountState = $mUser.AccountState
+						Workload = 'Entra ID'
+					}
+					$pUsers.Add($memberDetails) | Out-Null
+				}
+			} else {
+				Write-Verbose -Message "Member assigned $($mRole.displayName) role: $($mRoleMember.principalId)"
+				
+				# Get member details
+				$mUser = Get-UserDetails -id $mRoleMember.principalId
 
-	        # Add to final object
-	        $pUsers += New-Object -TypeName PSObject -Property @{
-	            SignInName = $mUser.SignInName
-	            PasswordAge = $mUser.PasswordAge
-	            Role = $mRole.displayName
-	            MFAState = $mUser.MFAState
-				MFADefault = $mUser.MFADefault
-	            MFAPhone = $mUser.MFAPhone
-	            UserType = $mUser.UserType
-				AccountState = $mUser.AccountState
-				Workload = 'Entra ID'
-	        }
+				# Add to final object
+				$memberDetails = New-Object -TypeName PSObject -Property @{
+					SignInName = $mUser.SignInName
+					PasswordAge = $mUser.PasswordAge
+					Role = $mRole.displayName
+					MFAState = $mUser.MFAState
+					MFADefault = $mUser.MFADefault
+					MFAPhone = $mUser.MFAPhone
+					UserType = $mUser.UserType
+					AccountState = $mUser.AccountState
+					Workload = 'Entra ID'
+				}
+				$pUsers.Add($memberDetails) | Out-Null
+			}
 	    }
 	}
 	Write-Progress -Activity "Entra Role Assignments" -Completed
@@ -387,7 +424,7 @@ if ($SkipWorkload -notcontains 'SCC') {
 	        $mUser = Get-UserDetails -id $user.Id
 					
 			# Add to final object
-	        $pUsers += New-Object -TypeName PSObject -Property @{
+	        $memberDetails = New-Object -TypeName PSObject -Property @{
 	            SignInName = $user.ParentGroup + $mUser.SignInName
 	            PasswordAge = $mUser.PasswordAge
 	            Role = $sccRole.DisplayName
@@ -398,6 +435,7 @@ if ($SkipWorkload -notcontains 'SCC') {
 				AccountState = $mUser.AccountState
 				Workload = 'Security and Compliance'
 	        }
+			$pUsers.Add($memberDetails) | Out-Null
 		}			
 	}
 	Write-Progress -Activity "SCC Role Assignments" -Completed
@@ -444,7 +482,7 @@ if ($SkipWorkload -notcontains 'EXO') {
 	        $mUser = Get-UserDetails -id $user.Id
 					
 			# Add to final object
-	        $pUsers += New-Object -TypeName PSObject -Property @{
+	        $memberDetails = New-Object -TypeName PSObject -Property @{
 	            SignInName = $user.ParentGroup + $mUser.SignInName
 	            PasswordAge = $mUser.PasswordAge
 	            Role = $rm.Name
@@ -455,6 +493,7 @@ if ($SkipWorkload -notcontains 'EXO') {
 				AccountState = $mUser.AccountState
 				Workload = 'Exchange Online'
 	        }
+			$pUsers.Add($memberDetails) | Out-Null
 		}
 	}
 	Write-Progress -Activity "EXO Role Assignments" -Completed
@@ -477,13 +516,13 @@ if ($pUsers.Count -gt 0) {
 	$workloadGrouping = $pUsers | Group-Object -Property Workload
 	foreach ($w in $workloadGrouping) {
 	
-		$Report+= "<div class='card'>
+		$Report += "<div class='card'>
 			<h3 class='card-header'>
 			Workload: $($w.Name)
 			</h3>"
 		
-		$roleGrouping = $w.Group | Group-Object -Property	Role
-		ForEach($r in $RoleGrouping) {
+		$roleGrouping = $w.Group | Group-Object -Property Role
+		foreach ($r in $RoleGrouping) {
 			$Report += "<div class='card'>
 			<div class='card-header'>
 			Role: $($r.Name)
@@ -503,7 +542,7 @@ if ($pUsers.Count -gt 0) {
 			</thead>
 			<tbody>"
 
-			foreach($u in $r.Group) {
+			foreach($u in ($r.Group | Sort-Object -Property SignInName)) {
 				$Report += "<tr>"
 				$Report += "<td>$($u.SignInName)</td>"
 				$Report += "<td>$($u.UserType)</td>"
