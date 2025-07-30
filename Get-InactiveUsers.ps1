@@ -13,22 +13,28 @@
 
 <#
 	.SYNOPSIS
-		Get users via Microsoft Graph based on sign-in activity
+		Get users via Microsoft Graph based on lack of sign-in activity
 
 	.DESCRIPTION
         This script will retrieve a list of users who have not signed in for at least a specified number of days.
         Requires Microsoft Entra P1 or P2 license in the tenant.
-        Requires Microsoft.Graph.Authentication module.
-        Requires the signed in user to have User.Read.All (or higher) delegated scope. Permissions: https://learn.microsoft.com/en-us/graph/api/user-list?view=graph-rest-1.0&tabs=http#permissions
-        Requires the signed in user to have AuditLog.Read.All delegated scope and a sufficient Entra role (Reports Reader is least privileged role). Permissions: https://learn.microsoft.com/en-us/graph/api/signin-list?view=graph-rest-1.0&tabs=http#permissions
+        Requires the signed in user to have User.Read.All (or higher) delegated scope.
+            Permissions: https://learn.microsoft.com/en-us/graph/api/user-list?view=graph-rest-1.0&tabs=http#permissions
+        Requires the signed in user to have AuditLog.Read.All delegated scope and a sufficient Entra role. (Reports Reader is least privileged role.)
+            Permissions: https://learn.microsoft.com/en-us/graph/api/signin-list?view=graph-rest-1.0&tabs=http#permissions
 
     .PARAMETER SignInType
         Filter users on the type of sign-in: interactive (successful or unsuccessful), non-interactive (successful or unsuccessful),
         or successful (for either type). Valid values are Interactive, NonInteractive, and Successful.
         Successful is the default.
 
-    .PARAMETER DaysOfInactivity
-        The number of days of sign-in inactivity for the user to be returned. Default value is 30.
+    .PARAMETER MemberDaysOfInactivity
+        The number of days of sign-in inactivity for a member user to be returned. Default value is 30.
+        Note: Users with a null value for the date/time of the sign-in type will not be returned.
+
+    .PARAMETER GuestDaysOfInactivity
+        The number of days of sign-in inactivity for a guest user to be returned. Default value is 90.
+        Cannot be less than MemberDaysOfInactivity if members are included.
         Note: Users with a null value for the date/time of the sign-in type will not be returned.
     
     .PARAMETER CloudEnvironment
@@ -42,8 +48,8 @@
         Switch to skip exporting the results to CSV and instead output the result objects to the host.
         
 	.NOTES
-        Version 1.4.2
-        January 7, 2025
+        Version 1.5
+        July 30, 2025
 
 	.LINK
 		about_functions_advanced   
@@ -52,11 +58,17 @@
 [CmdletBinding()]
 param (
     [ValidateSet('Interactive','NonInteractive','Successful')]$SignInType = 'Successful',
-    [int]$DaysOfInactivity = 30,
+    [int]$MemberDaysOfInactivity = 30,
+    [int]$GuestDaysOfInactivity = 90,
     [ValidateSet("Member", "Guest")][string[]]$UserType = @("Member", "Guest"),
     [ValidateSet("Commercial", "USGovGCC", "USGovGCCHigh", "USGovDoD", "China")][string]$CloudEnvironment="Commercial",
     [switch]$DoNotExportToCSV
 )
+
+if ($UserType -contains 'Member' -and $GuestDaysOfInactivity -lt $MemberDaysOfInactivity) {
+    Write-Error -Message "GuestDaysOfInactivity cannot be less than MemberDaysOfInactivity when UserType includes Members."
+    exit
+}
 
 # Start-Transcript -Path "Transcript-inactiveusers.txt" -Append
 switch ($CloudEnvironment) {
@@ -94,7 +106,14 @@ if ($neededScopes) {
     Connect-MgGraph -ContextScope CurrentUser -Scopes $neededScopes -Environment $cloud -NoWelcome
 }
 
-$targetdate = (Get-Date).ToUniversalTime().AddDays(-$DaysOfInactivity).ToString("o")
+if ($UserType -contains 'Member') {
+    $targetdate = (Get-Date).ToUniversalTime().AddDays(-$MemberDaysOfInactivity).ToString("o")
+} else {
+    $targetdate = (Get-Date).ToUniversalTime().AddDays(-$GuestDaysOfInactivity).ToString("o")
+}
+# Used for client-side filtering of results for guest users
+$guestTargetDate = (Get-Date).ToUniversalTime().AddDays(-$GuestDaysOfInactivity)
+
 $result = New-Object -TypeName System.Collections.ArrayList
 switch ($SignInType) {
     Interactive {$siFilter = 'signInActivity/lastSignInDateTime'}
@@ -106,7 +125,14 @@ switch ($SignInType) {
 # https://learn.microsoft.com/en-us/entra/identity/monitoring-health/howto-manage-inactive-user-accounts
 $apiUrl = "/v1.0/users?`$filter=$siFilter lt $($targetdate)&`$select=accountEnabled,id,userType,signInActivity,userprincipalname"
 Write-Verbose "Initial URL: $apiUrl"
-Write-Host -ForegroundColor Green "$(Get-Date) Getting users based on $DaysOfInactivity days of inactivity..."
+$typeMessage = @()
+if ($UserType -contains 'Member') {
+    $typeMessage += "member users with $MemberDaysOfInactivity+ days"
+}
+if ($UserType -contains 'Guest') {
+    $typeMessage += "guest users with $GuestDaysOfInactivity+ days"
+}
+Write-Host -ForegroundColor Green "$(Get-Date) Getting $($typeMessage -join ' and ') of sign-in inactivity..."
 do {
     # Get data via Graph and continue paging until complete
     $response = Invoke-MgGraphRequest -Method GET $apiUrl -OutputType PSObject
@@ -122,14 +148,16 @@ if ($result.Count -gt 0) {
 
     $return=@()
     foreach ($item in $result) {
-        if (($UserType -contains "Member" -and $item.UserType -eq "Member") -or ($UserType -contains "Guest" -and $item.UserType -eq "Guest")) {
+        if (($UserType -contains 'Member' -and $item.userType -eq 'Member') -or 
+            ($UserType -contains 'Guest' -and $item.userType -eq 'Guest' -and $item.'signInActivity'.$($siFilter.SubString($siFilter.IndexOf('/')+1)) -lt $guestTargetDate)) {
+
             if ($null -ne $item.userPrincipalName -and $item.accountEnabled -eq $true) {
                 $return += New-Object -TypeName PSObject -Property @{
-                    UserPrincipalName = $item.userprincipalname
-                    LastSuccessfulSignIn = $item.signinactivity.lastSuccessfulSignInDateTime
-                    LastInteractiveSignIn = $item.signinactivity.lastsignindatetime
-                    LastNonInteractiveSignIn = $item.signinactivity.lastNonInteractiveSignInDateTime
-                    UserType = $item.usertype
+                    UserPrincipalName = $item.userPrincipalName
+                    LastSuccessfulSignIn = $item.signInActivity.lastSuccessfulSignInDateTime
+                    LastInteractiveSignIn = $item.signInActivity.lastSignInDateTime
+                    LastNonInteractiveSignIn = $item.signInActivity.lastNonInteractiveSignInDateTime
+                    UserType = $item.userType
                 }
             }
         }
