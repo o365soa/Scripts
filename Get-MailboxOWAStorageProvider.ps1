@@ -49,7 +49,7 @@
 		Get-Mailbox -RecipientTypeDetails UserMailbox -ResultSize unlimited | .\Get-MailboxOWAStorageProvider
 	.Notes
 		Version: 1.2
-		Date: July 30, 2025
+		Date: August 13, 2025
 #>
 
 [CmdletBinding()]
@@ -144,6 +144,9 @@ begin {
 	$scope = New-Object System.Collections.Generic.List[string]
 	$scope.Add("$ewsUrl/.default")
 	$token = $confidentialClient.AcquireTokenForClient($scope).ExecuteAsync().GetAwaiter().GetResult()
+	if (-not $CertificateAuthentication) {
+		Remove-Variable -Name appSecret,ssAppSecret -ErrorAction SilentlyContinue
+	}
 }
 
 process {
@@ -184,8 +187,5 @@ process {
 	}
 }
 end {
-	if (-not $CertificateAuthentication) {
-		Remove-Variable -Name appSecret,ssAppSecret -ErrorAction SilentlyContinue
-	}
 	Write-Progress -Activity 'Getting OWA storage provider settings' -Completed
 }
