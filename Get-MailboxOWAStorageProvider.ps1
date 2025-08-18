@@ -16,18 +16,23 @@
 		Get the configured third-party storage providers for a given mailbox.
 	.Description
 		Using Exchange Web Services, any third-party storage providers configured for a mailbox (which can be
-		configured via Outlook on the web) will be retrieved, including the account name
-		configured for a given provider.
-		
-		Important: Requires the EWS Managed API to be installed on the local machine.
+		configured via Outlook on the web) will be retrieved, including the account name configured
+		for a given provider. Supports client secret and certificate authentication.
+
+		* Important: Requires the EWS Managed API to be installed on the local machine.
 			1. Run PowerShell as Administrator
 			2. Run the following: Install-Package Microsoft.Exchange.Webservices
-			   Note: If NuGet is not a registered package source: https://learn.microsoft.com/en-us/powershell/gallery/powershellget/supported-repositories
-		Important: Requires the authenticated account to have impersonation access to the mailbox: https://learn.microsoft.com/en-us/exchange/client-developer/exchange-web-services/how-to-configure-impersonation
-		Important: Requires an Entra ID app registration with delegated permission for EWS.AccessAsUser.All.
-		    Details for registering an app and adding the delegated permission:
+			   Note: If NuGet is not a registered package source:
+			   https://learn.microsoft.com/en-us/powershell/gallery/powershellget/supported-repositories
+		* Important: Requires an Entra ID app registration configured for app-only authentication
+		  with EWS.AccessAsApp (full_access_as_app).
+		    Details for registering an app and adding the role to the manifest:
 		    https://learn.microsoft.com/en-us/exchange/client-developer/exchange-web-services/how-to-authenticate-an-ews-application-by-using-oauth#register-your-application
 			Note: Enter the application ID and tenant's default routing domain in the variables at the top of the begin block.
+		* Important: Requires the corresponding enterprise application (service principal) to have a role assignment
+		  with the "Application EWS.AccessAsApp" role (and a scope that includes the desired mailboxes).
+			Details for creating the service principal link and management role assignment in EXO:
+			https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac
 	.Parameter EmailAddress
 		Email address of the mailbox from which to retrieve the configuration. Supports pipeline input
 		of email addresses or objects with an EmailAddress or PrimarySMTPAddress property, such as
@@ -35,28 +40,38 @@
 	.Parameter Cloud
 		Office 365 environment which hosts the mailboxes. Valid values are Commercial, USGovGCC, China.
 		Default value is Commercial. The feature is not available in GCC High and DoD. Unknown if available in China.
+	.Parameter CertificateAuthentication
+		Use a certificate for authentication instead of a client secret. The app registration must have a
+		certificate uploaded, installed on the local machine in Current User\Personal\Certificates,
+		and the thumbprint specified in the variables region below.
 	.Example
-		Get-MailboxOWAStorageProvider johndoe@contoso.com
-		Get-Mailbox -RecipientTypeDetails UserMailbox -ResultSize unlimited | Get-MailboxOWAStorageProvider
+		.\Get-MailboxOWAStorageProvider johndoe@contoso.com
+		Get-Mailbox -RecipientTypeDetails UserMailbox -ResultSize unlimited | .\Get-MailboxOWAStorageProvider
 	.Notes
-		Version: 1.1
-		Date: January 7, 2025
+		Version: 1.2
+		Date: August 13, 2025
 #>
 
 [CmdletBinding()]
 param (
 	[Parameter(Mandatory=$true,ValueFromPipelinebyPropertyName=$true,Position=0)][Alias('PrimarySMTPAddress')][string]$EmailAddress,
-	[ValidateSet('Commercial','USGovGCC','China')][string]$Cloud = 'Commercial'
+	[ValidateSet('Commercial','USGovGCC','China')][string]$Cloud = 'Commercial',
+	[switch]$CertificateAuthentication
 )
 
 begin {
 	# Variables
-	$tenantDomain = 'tenantname.onmicrosoft.com' #Default routing domain of the tenant
-	$appId = '00000000-0000-0000-0000-000000000000' #Application ID of the app registration in Entra ID with EWS permission
+	$tenantDomain = 'tenantname.onmicrosoft.com' # Default routing domain of the tenant
+	$appId = '00000000-0000-0000-0000-000000000000' # Application ID of the app registration in Entra ID with EWS permission
+	$certThumbprint = '' # Thumbprint of the certificate to use for authentication if CertificateAuthentication switch is used
 	# End variables
 
 	if ($tenantDomain -like "tenantname*" -or $appId -like "00000000*") {
 		Write-Error "The tenant domain or application ID has not been specified in the Variables section of the `"begin`" block."
+		break
+	}
+	if ($CertificateAuthentication -and -not $certThumbprint) {
+		Write-Error "The certificate thumbprint has not been specified in the Variables section of the `"begin`" block."
 		break
 	}
 
@@ -87,7 +102,7 @@ begin {
 	}
 
 	# Import MSAL from Exchange Online module
-	if (-not('Microsoft.Identity.Client.PublicClientApplicationBuilder' -as [type])) {
+	if (-not('Microsoft.Identity.Client.ConfidentialClientApplicationBuilder' -as [type])) {
 		Write-Verbose 'Loading the MSAL from EXO module installation...'
 		if ($PSEdition -eq 'Core') {$folder = 'netCore'} else {	$folder = 'NetFramework'}
 		$ExoModule = Get-Module -Name ExchangeOnlineManagement -ListAvailable | Sort-Object -Property Version -Descending | Select-Object -First 1
@@ -103,17 +118,35 @@ begin {
 	    'USGovGCC'      { $base = 'https://login.microsoftonline.com/';$ewsUrl = 'https://outlook.office365.com'}
 	    'China'         { $base = 'https://login.partner.microsoftonline.cn/';$ewsUrl = 'https://partner.outlook.cn'}
 	}
-	# Build public client app and get access token
+	# Build client app and get access token
 	$replyUri = $base + 'common/oauth2/nativeclient'
-	$authority = $base + $tenantDomain
 	$capabilities = New-Object System.Collections.Generic.List[string]
 	# cp1 indicates support for CAE, which will result in an access token that is valid for 29 hours
 	# (This helps collecting from all mailboxes in a large org without needing to include support for token expiration.)
 	$capabilities.Add('cp1')
-	$publicClient = [Microsoft.Identity.Client.PublicClientApplicationBuilder]::Create($appId).WithRedirectUri($replyUri).WithAuthority($authority).WithClientCapabilities($capabilities).Build()
+	if ($CertificateAuthentication) {
+		# Use certificate authentication
+		$cert = Get-Item "Cert:\CurrentUser\My\$certThumbprint"
+		if (-not $cert) {
+			Write-Error "The certificate with thumbprint $certThumbprint was not found in the CurrentUser\My store."
+			break
+		}
+		$confidentialClient = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($appId).WithRedirectUri($replyUri).WithCertificate($cert).WithTenantId($tenantDomain).WithClientCapabilities($capabilities).Build()
+	}
+	else {
+		# Use client secret authentication
+		$ssAppSecret = (Get-Credential -Message "Enter the app registration's client secret in the password field." -UserName "EWS Application").Password
+		$bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($ssAppSecret)
+		$appSecret = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+		[System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+		$confidentialClient = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($appId).WithRedirectUri($replyUri).WithClientSecret($appSecret).WithTenantId($tenantDomain).WithClientCapabilities($capabilities).Build()
+	}
 	$scope = New-Object System.Collections.Generic.List[string]
-	$scope.Add("$ewsUrl/EWS.AccessAsUser.All")
-	$token = $publicClient.AcquireTokenInteractive($scope).ExecuteAsync().GetAwaiter().GetResult()
+	$scope.Add("$ewsUrl/.default")
+	$token = $confidentialClient.AcquireTokenForClient($scope).ExecuteAsync().GetAwaiter().GetResult()
+	if (-not $CertificateAuthentication) {
+		Remove-Variable -Name appSecret,ssAppSecret -ErrorAction SilentlyContinue
+	}
 }
 
 process {
