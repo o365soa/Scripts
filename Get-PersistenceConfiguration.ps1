@@ -23,7 +23,7 @@
 		.\Get-PersistenceConfiguration.ps1 johndoe@contoso.com -StartDate (Get-Date).AddDays(-14)
 	.Notes
 		Version: 2.0
-		Date: October 23, 2025
+		Date: November 4, 2025
 #>
 [CmdletBinding()]
 param (
@@ -118,7 +118,7 @@ function Get-MailboxRules {
             	RuleName = $ruleEntry.Name
 				RuleAction = $ruleAction
 				Enabled = $ruleEntry.Enabled
-				Date = if ($runDate) {$runDate} else {'Unknown'}
+				Date = if ($runDate) {$runDate} else {'OutsideOfSearchWindow'}
 			}
         }
 	}
@@ -147,7 +147,7 @@ function Get-OWAForwarding {
 				}
 			}
 		}
-		$checkForwardOutput.Date = if ($runDate) {$runDate} else {'Unknown'}
+		$checkForwardOutput.Date = if ($runDate) {$runDate} else {'OutsideOfSearchWindow'}
 		$checkForwardOutput
 	}
 }
@@ -267,12 +267,12 @@ function Get-CalendarPublishing {
 					break
 				}
 				else {
-					$checkCalPubOutput.Date = 'Unknown'
+					$checkCalPubOutput.Date = 'OutsideOfSearchWindow'
 				}
 			}
 		}
 		else {
-			$checkCalPubOutput.Date = 'Unknown'
+			$checkCalPubOutput.Date = 'OutsideOfSearchWindow'
 		}
 		$checkCalPubOutput
 	}
@@ -470,7 +470,7 @@ function Get-ExAdminPersistence {
 					Check = 'Exchange Admin Persistence'
 					User = $UserPrincipalName
 					Operation = $entry.Operations
-					RuleName = $auditData.Parameters | Where-Object {$_.Name -eq 'Name'} | Select-Object -ExpandProperty Value
+					RuleName = $auditData.ObjectId
 					JournalRecipient = $auditData.Parameters | Where-Object {$_.Name -eq 'JournalEmailAddress'} | Select-Object -ExpandProperty Value
 					Date = ([datetime]$entry.CreationDate).ToLocalTime() # CreationDate is stored in UTC
 				}
@@ -480,7 +480,7 @@ function Get-ExAdminPersistence {
 					Check = 'Exchange Admin Persistence'
 					User = $UserPrincipalName
 					Operation = $entry.Operations
-					RuleName = $auditData.Parameters | Where-Object {$_.Name -eq 'Name'} | Select-Object -ExpandProperty Value
+					RuleName = $auditData.ObjectId
 					Date = ([datetime]$entry.CreationDate).ToLocalTime() # CreationDate is stored in UTC
 				}
 			}
